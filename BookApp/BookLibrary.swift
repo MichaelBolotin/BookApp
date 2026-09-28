@@ -102,6 +102,20 @@ final class BookLibrary: ObservableObject {
         scheduleCloudSync()
     }
 
+    func importPastedText() throws {
+        let imported = try PastedTextImportService.extract()
+        let fingerprintText = imported.pages.map(\.text).joined(separator: "\u{000C}")
+        let digest = SHA256.hash(data: Data(fingerprintText.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        guard !books.contains(where: { $0.fingerprint == digest }) else { throw LibraryError.duplicate }
+        let book = ReadingBook(id: UUID(), title: imported.title, addedAt: Date(),
+                               fingerprint: digest, pages: imported.pages,
+                               modifiedAt: Date(), source: .pastedText)
+        try save(book)
+        books.insert(book, at: 0)
+        scheduleCloudSync()
+    }
+
     func requestWord(_ wordIndex: Int, on pageIndex: Int, in id: UUID, retry: Bool = false) {
         guard var book = books.first(where: { $0.id == id }),
               book.pages.indices.contains(pageIndex),
@@ -314,27 +328,30 @@ final class BookLibrary: ObservableObject {
                             to: bookURL(item.id, extension: "deleted"), options: .atomic)
                     } else if let local {
                         try await cloud.upload(local, snapshotURL: bookURL(item.id, extension: "json"),
-                                               pdfURL: bookURL(item.id, extension: "pdf"))
+                                               pdfURL: local.source == .pastedText ? nil : bookURL(item.id, extension: "pdf"))
                     }
                     continue
                 }
                 if local == nil || item.modifiedAt > (local?.modifiedAt ?? local?.addedAt ?? .distantPast) {
-                    guard let snapshot = item.snapshot, let pdf = item.pdf,
-                          let imported = Self.decodeBook(snapshot) else { continue }
+                    guard let snapshot = item.snapshot,
+                          let imported = Self.decodeBook(snapshot),
+                          imported.source == .pastedText || item.pdf != nil else { continue }
                     try JSONEncoder().encode(imported).write(to: bookURL(item.id, extension: "json"), options: .atomic)
-                    try pdf.write(to: bookURL(item.id, extension: "pdf"), options: .atomic)
+                    if let pdf = item.pdf {
+                        try pdf.write(to: bookURL(item.id, extension: "pdf"), options: .atomic)
+                    }
                     books.removeAll { $0.id == item.id }
                     books.append(imported)
                     books.sort { $0.addedAt > $1.addedAt }
                 } else if let local {
                     try await cloud.upload(local, snapshotURL: bookURL(item.id, extension: "json"),
-                                           pdfURL: bookURL(item.id, extension: "pdf"))
+                                           pdfURL: local.source == .pastedText ? nil : bookURL(item.id, extension: "pdf"))
                 }
             }
             for book in books where !remoteIDs.contains(book.id)
                 && (book.pendingWordTranslations ?? []).isEmpty {
                 try await cloud.upload(book, snapshotURL: bookURL(book.id, extension: "json"),
-                                       pdfURL: bookURL(book.id, extension: "pdf"))
+                                       pdfURL: book.source == .pastedText ? nil : bookURL(book.id, extension: "pdf"))
             }
             for (id, date) in tombstones where !remoteIDs.contains(id) {
                 try await cloud.delete(id, at: date)
@@ -354,7 +371,7 @@ final class BookLibrary: ObservableObject {
 
     enum LibraryError: LocalizedError {
         case duplicate
-        var errorDescription: String? { "This PDF is already in your library." }
+        var errorDescription: String? { "This book is already in your library." }
     }
 }
 
