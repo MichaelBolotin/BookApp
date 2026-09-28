@@ -247,10 +247,7 @@ final class BookLibrary: ObservableObject {
     }
 
     func syncCloud() async {
-        guard AppConfiguration.cloudKitEnabled else {
-            cloudStatus = "iCloud sync is not enabled in this build. Books stay on this device."
-            return
-        }
+        #if CLOUDKIT_ENABLED
         cloudStatus = "Syncing with iCloud…"
         do {
             // Do not construct CKContainer in builds without the iCloud entitlement.
@@ -303,6 +300,9 @@ final class BookLibrary: ObservableObject {
         } catch {
             cloudStatus = "iCloud sync unavailable: \(error.localizedDescription)"
         }
+        #else
+        cloudStatus = "iCloud sync is not enabled in this build. Books stay on this device."
+        #endif
     }
 
     private func bookURL(_ id: UUID, extension ext: String) -> URL {

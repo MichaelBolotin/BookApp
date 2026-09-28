@@ -5,13 +5,13 @@ import Foundation
 enum AppConfiguration {
     static let fallbackAPIKey = "" // Optional local development key. Never commit a real key.
 
-    /// Set the Info.plist flag only in a build signed with a matching CloudKit entitlement.
-    /// CKContainer.default() aborts at runtime if the entitlement is missing.
-    static var cloudKitEnabled: Bool {
-        let value = Bundle.main.object(forInfoDictionaryKey: "BookAppCloudKitEnabled")
-        return (value as? NSNumber)?.boolValue == true
-            || (value as? String)?.lowercased() == "yes"
-    }
+    /// Enable CLOUDKIT_ENABLED only in a build signed with a matching entitlement.
+    /// CKContainer.default() aborts at runtime if that entitlement is missing.
+    #if CLOUDKIT_ENABLED
+    static let cloudKitEnabled = true
+    #else
+    static let cloudKitEnabled = false
+    #endif
 
     enum GeminiModel: String, CaseIterable, Identifiable {
         case flashLite = "gemini-3.5-flash-lite"

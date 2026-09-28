@@ -13,10 +13,3 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build iOS Simulator app
         run: xcodebuild -project BookApp.xcodeproj -scheme BookApp -configuration Debug -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
-      - name: Verify local-only default
-        run: |
-          set -euo pipefail
-          APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -path '*/Build/Products/Debug-iphonesimulator/BookApp.app' -type d | head -n 1)
-          test -n "$APP_PATH"
-          VALUE=$(/usr/libexec/PlistBuddy -c 'Print BookAppCloudKitEnabled' "$APP_PATH/Info.plist")
-          case "$VALUE" in NO|false|False|0) ;; *) echo "CloudKit must be disabled by default"; exit 1 ;; esac
