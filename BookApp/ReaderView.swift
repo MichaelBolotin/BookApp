@@ -114,10 +114,12 @@ struct ReaderView: View {
     }
 
     private func readingText(_ page: ReadingPage) -> some View {
-        let selection = selectedWordIndex.flatMap { index in
-            guard page.words.indices.contains(index) else { return nil }
-            return page.translations.first { $0.contains(index) } ??
+        let selection: TranslationSpan?
+        if let index = selectedWordIndex, page.words.indices.contains(index) {
+            selection = page.translations.first { $0.contains(index) } ??
                 TranslationSpan(start: index, end: index, hebrew: "")
+        } else {
+            selection = nil
         }
         return InteractiveTextView(page: page, selection: selection, style: style) { index in
             selectedWordIndex = index
