@@ -40,6 +40,9 @@ struct ReadingBook: Codable, Identifiable {
     var rawResponse: String? = nil
     /// Earlier paid responses remain available even after an explicit new request.
     var previousResponses: [String]? = nil
+    var translationModelID: String? = nil
+    var translationCost: BookTranslationCost? = nil
+    var modifiedAt: Date? = nil
     var currentPage: Int = 0
 
     var wordCount: Int { pages.reduce(0) { $0 + $1.words.count } }

@@ -6,9 +6,13 @@ import Security
 @MainActor
 final class BookLibrary: ObservableObject {
     @Published private(set) var books: [ReadingBook] = []
-    private var jobs: [UUID: Task<Void, Never>] = [:]
+    @Published private(set) var cloudStatus = "Waiting for iCloud sync"
 
     private let directory: URL
+    private let cloud = CloudBookSync()
+    private var tombstones: [UUID: Date] = [:]
+    private var syncTask: Task<Void, Never>?
+    private var syncAgain = false
 
     init() {
         directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -19,6 +23,13 @@ final class BookLibrary: ObservableObject {
             guard let data = try? Data(contentsOf: url) else { return nil }
             return try? JSONDecoder().decode(ReadingBook.self, from: data)
         }.sorted { $0.addedAt > $1.addedAt }
+        for file in files where file.pathExtension == "deleted" {
+            guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent),
+                  let data = try? Data(contentsOf: file),
+                  let date = try? JSONDecoder().decode(Date.self, from: data) else { continue }
+            tombstones[id] = date
+        }
+        BackgroundGeminiService.shared.onResult = { [weak self] id in self?.handleResult(id) }
     }
 
     func importPDF(at url: URL) throws {
@@ -33,49 +44,60 @@ final class BookLibrary: ObservableObject {
         try data.write(to: destination, options: .atomic)
         let book = ReadingBook(id: id, title: url.deletingPathExtension().lastPathComponent,
                                addedAt: Date(), fingerprint: digest, pages: pages,
-                               state: .processing, errorMessage: nil)
+                               state: .processing, errorMessage: nil, modifiedAt: Date())
         do { try save(book) } catch {
             try? FileManager.default.removeItem(at: destination)
             throw error
         }
         books.insert(book, at: 0)
-        resume(id)
+        scheduleCloudSync()
+        start(id)
     }
 
-    func resumePending() {
-        for candidate in books where candidate.state == .processing && jobs[candidate.id] == nil {
+    func resumePending() async {
+        let active = await BackgroundGeminiService.shared.activeBookIDs()
+        var awaitingTaskRegistration = false
+        for candidate in books where candidate.state == .processing {
             var book = candidate
-            if book.rawResponse != nil {
-                resume(book.id) // Reuse the saved response without a network call.
-            } else {
+            if BackgroundGeminiService.shared.result(book.id) != nil {
+                handleResult(book.id)
+            } else if book.rawResponse != nil {
+                processSaved(book.id)
+            } else if active.contains(book.id) {
+                continue
+            } else if Date().timeIntervalSince(book.modifiedAt ?? book.addedAt) > 120 {
                 book.state = .failed
-                book.errorMessage = "The previous request was interrupted before its result was saved. Its outcome is unknown. Send a new request explicitly if you want to try again."
+                book.errorMessage = "The background transfer ended without a saved result. Its remote outcome is unknown. Send a new request explicitly if you want to try again."
                 try? replace(book)
+            } else {
+                awaitingTaskRegistration = true
+            }
+        }
+        if awaitingTaskRegistration {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(125))
+                await self?.resumePending()
             }
         }
     }
 
-    func resume(_ id: UUID) {
-        guard jobs[id] == nil, let book = books.first(where: { $0.id == id }),
-              book.state == .processing else { return }
-        jobs[id] = Task { [weak self] in
-            await self?.process(id)
-            self?.jobs[id] = nil
-        }
-    }
-
     func retry(_ id: UUID) {
-        guard jobs[id] == nil, var book = books.first(where: { $0.id == id }),
+        if BackgroundGeminiService.shared.result(id) != nil {
+            handleResult(id) // Recover a delivered response before considering a paid retry.
+            return
+        }
+        guard var book = books.first(where: { $0.id == id }),
               book.state == .failed else { return }
         if let raw = book.rawResponse {
             book.previousResponses = (book.previousResponses ?? []) + [raw]
         }
         book.rawResponse = nil
+        book.translationCost = nil
         book.errorMessage = nil
         book.state = .processing
         do {
             try replace(book)
-            resume(id)
+            start(id)
         } catch {
             book.state = .failed
             book.errorMessage = error.localizedDescription
@@ -84,12 +106,12 @@ final class BookLibrary: ObservableObject {
     }
 
     func recheckSavedResponse(_ id: UUID) {
-        guard jobs[id] == nil, var book = books.first(where: { $0.id == id }),
+        guard var book = books.first(where: { $0.id == id }),
               book.state == .failed, book.rawResponse != nil else { return }
         book.state = .processing
         do {
             try replace(book)
-            resume(id) // process parses the saved response without making an HTTP request.
+            processSaved(id) // No HTTP request.
         } catch {
             book.state = .failed
             book.errorMessage = error.localizedDescription
@@ -104,27 +126,83 @@ final class BookLibrary: ObservableObject {
     }
 
     func delete(_ id: UUID) {
-        jobs[id]?.cancel()
-        jobs[id] = nil
+        BackgroundGeminiService.shared.cancel(id)
+        let date = Date()
+        let tombstoneURL = directory.appendingPathComponent(id.uuidString).appendingPathExtension("deleted")
+        do {
+            try JSONEncoder().encode(date).write(to: tombstoneURL, options: .atomic)
+        } catch { return }
+        tombstones[id] = date
         books.removeAll { $0.id == id }
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(id.uuidString).appendingPathExtension("json"))
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(id.uuidString).appendingPathExtension("pdf"))
+        scheduleCloudSync()
     }
 
-    private func process(_ id: UUID) async {
+    private func start(_ id: UUID) {
         guard var book = books.first(where: { $0.id == id }) else { return }
         do {
+            if book.rawResponse != nil {
+                processSaved(id)
+                return
+            }
             let translator = GeminiTranslator(apiKey: SettingsStore.apiKey,
                                               model: SettingsStore.model,
                                               instructions: SettingsStore.instructions)
-            if book.rawResponse == nil {
-                // Import and interrupted jobs make one request for the entire book.
-                let raw = try await translator.requestTranslation(for: book.pages)
+            let (request, body) = try translator.makeRequest(for: book.pages)
+            book.translationModelID = translator.model.rawValue
+            try replace(book)
+            try BackgroundGeminiService.shared.enqueue(bookID: id, request: request, body: body)
+        } catch {
+            book.state = .failed
+            book.errorMessage = error.localizedDescription
+            try? replace(book)
+        }
+    }
+
+    private func handleResult(_ id: UUID) {
+        guard let outcome = BackgroundGeminiService.shared.result(id) else { return }
+        guard var book = books.first(where: { $0.id == id }) else {
+            BackgroundGeminiService.shared.removeResult(id)
+            return
+        }
+        do {
+            if let status = outcome.status, (200..<300).contains(status),
+               let raw = String(data: outcome.body, encoding: .utf8) {
                 book.rawResponse = raw
-                try replace(book) // Keep the paid response before attempting any parsing.
+                book.translationCost = BookTranslationCost.estimate(
+                    rawResponse: raw, requestedModel: book.translationModelID)
+                try replace(book) // Durable paid response before parsing or removing transfer result.
+                BackgroundGeminiService.shared.removeResult(id)
+                processSaved(id)
+            } else {
+                book.state = .failed
+                if let status = outcome.status {
+                    book.errorMessage = GeminiTranslator.responseError(
+                        status: status, data: outcome.body,
+                        modelID: book.translationModelID ?? "unknown",
+                        wordCount: book.wordCount).localizedDescription
+                } else {
+                    book.errorMessage = outcome.error ?? "Background transfer ended without an HTTP response."
+                }
+                try replace(book)
+                BackgroundGeminiService.shared.removeResult(id)
             }
-            let translated = try GeminiTranslator.parse(book.rawResponse!, pages: book.pages)
-            try Task.checkCancellation()
+        } catch {
+            book.state = .failed
+            book.errorMessage = "Could not save the Gemini result: \(error.localizedDescription)"
+            try? replace(book)
+        }
+    }
+
+    private func processSaved(_ id: UUID) {
+        guard var book = books.first(where: { $0.id == id }), let raw = book.rawResponse else { return }
+        do {
+            if book.translationCost == nil {
+                book.translationCost = BookTranslationCost.estimate(
+                    rawResponse: raw, requestedModel: book.translationModelID)
+            }
+            let translated = try GeminiTranslator.parse(raw, pages: book.pages)
             for index in book.pages.indices {
                 book.pages[index].translations = translated.pages[index]
                 book.pages[index].completedChunkStarts = []
@@ -133,8 +211,6 @@ final class BookLibrary: ObservableObject {
             book.errorMessage = translated.translatedWords == translated.totalWords ? nil
                 : "\(translated.translatedWords) of \(translated.totalWords) words have a saved translation. Untranslated words remain tappable but show a missing-translation message."
             try replace(book)
-        } catch is CancellationError {
-            return
         } catch {
             book.state = .failed
             book.errorMessage = error.localizedDescription
@@ -142,15 +218,88 @@ final class BookLibrary: ObservableObject {
         }
     }
 
-    private func replace(_ book: ReadingBook) throws {
+    private func replace(_ value: ReadingBook) throws {
+        var book = value
+        book.modifiedAt = Date()
         try save(book)
         guard let index = books.firstIndex(where: { $0.id == book.id }) else { return }
         books[index] = book
+        scheduleCloudSync()
     }
 
     private func save(_ book: ReadingBook) throws {
         let data = try JSONEncoder().encode(book)
         try data.write(to: directory.appendingPathComponent(book.id.uuidString).appendingPathExtension("json"), options: .atomic)
+    }
+
+    func scheduleCloudSync() {
+        guard syncTask == nil else { syncAgain = true; return }
+        syncTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            await self?.syncCloud()
+            self?.syncTask = nil
+            if self?.syncAgain == true {
+                self?.syncAgain = false
+                self?.scheduleCloudSync()
+            }
+        }
+    }
+
+    func syncCloud() async {
+        cloudStatus = "Syncing with iCloud…"
+        do {
+            let remote = try await cloud.fetchAll()
+            var remoteIDs = Set<UUID>()
+            for item in remote {
+                remoteIDs.insert(item.id)
+                if let tombstone = tombstones[item.id], tombstone >= item.modifiedAt {
+                    try await cloud.delete(item.id, at: tombstone)
+                    continue
+                }
+                let local = books.first { $0.id == item.id }
+                if local?.state == .processing { continue }
+                if item.deleted {
+                    if local == nil || item.modifiedAt >= (local?.modifiedAt ?? local?.addedAt ?? .distantPast) {
+                        books.removeAll { $0.id == item.id }
+                        try? FileManager.default.removeItem(at: bookURL(item.id, extension: "json"))
+                        try? FileManager.default.removeItem(at: bookURL(item.id, extension: "pdf"))
+                        tombstones[item.id] = item.modifiedAt
+                        try? JSONEncoder().encode(item.modifiedAt).write(
+                            to: bookURL(item.id, extension: "deleted"), options: .atomic)
+                    } else if let local {
+                        try await cloud.upload(local, snapshotURL: bookURL(item.id, extension: "json"),
+                                               pdfURL: bookURL(item.id, extension: "pdf"))
+                    }
+                    continue
+                }
+                if local == nil || item.modifiedAt > (local?.modifiedAt ?? local?.addedAt ?? .distantPast) {
+                    guard let snapshot = item.snapshot, let pdf = item.pdf,
+                          let imported = try? JSONDecoder().decode(ReadingBook.self, from: snapshot) else { continue }
+                    try snapshot.write(to: bookURL(item.id, extension: "json"), options: .atomic)
+                    try pdf.write(to: bookURL(item.id, extension: "pdf"), options: .atomic)
+                    books.removeAll { $0.id == item.id }
+                    books.append(imported)
+                    books.sort { $0.addedAt > $1.addedAt }
+                } else if let local {
+                    try await cloud.upload(local, snapshotURL: bookURL(item.id, extension: "json"),
+                                           pdfURL: bookURL(item.id, extension: "pdf"))
+                }
+            }
+            for book in books where !remoteIDs.contains(book.id) && book.state != .processing {
+                try await cloud.upload(book, snapshotURL: bookURL(book.id, extension: "json"),
+                                       pdfURL: bookURL(book.id, extension: "pdf"))
+            }
+            for (id, date) in tombstones where !remoteIDs.contains(id) {
+                try await cloud.delete(id, at: date)
+            }
+            cloudStatus = "iCloud synced"
+        } catch {
+            cloudStatus = "iCloud sync unavailable: \(error.localizedDescription)"
+        }
+    }
+
+    private func bookURL(_ id: UUID, extension ext: String) -> URL {
+        directory.appendingPathComponent(id.uuidString).appendingPathExtension(ext)
     }
 
     enum LibraryError: LocalizedError {

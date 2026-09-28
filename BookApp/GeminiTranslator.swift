@@ -21,7 +21,7 @@ struct GeminiTranslator {
         }
     }
 
-    func requestTranslation(for pages: [ReadingPage]) async throws -> String {
+    func makeRequest(for pages: [ReadingPage]) throws -> (URLRequest, Data) {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw TranslationError.missingKey
         }
@@ -76,23 +76,14 @@ struct GeminiTranslator {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 600
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        try Task.checkCancellation()
-        // One HTTP request only. An uncertain network outcome is never silently retried.
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw TranslationError.invalidResponse("No HTTP response.")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let bodyText = String(data: data, encoding: .utf8) ?? "<non-UTF-8 response>"
-            let message = (try? JSONDecoder().decode(APIError.self, from: data).error.message)
-                ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-            throw TranslationError.api("HTTP \(http.statusCode): \(message)\n\nModel: \(model.rawValue)\nWords: \(count)\nFull server response:\n\(bodyText)")
-        }
-        guard let raw = String(data: data, encoding: .utf8) else {
-            throw TranslationError.invalidResponse("HTTP response was not UTF-8.")
-        }
-        return raw
+        return (request, try JSONSerialization.data(withJSONObject: body))
+    }
+
+    static func responseError(status: Int, data: Data, modelID: String, wordCount: Int) -> TranslationError {
+        let bodyText = String(data: data, encoding: .utf8) ?? "<non-UTF-8 response>"
+        let message = (try? JSONDecoder().decode(APIError.self, from: data).error.message)
+            ?? HTTPURLResponse.localizedString(forStatusCode: status)
+        return .api("HTTP \(status): \(message)\n\nModel: \(modelID)\nWords: \(wordCount)\nFull server response:\n\(bodyText)")
     }
 
     struct ParsedBook {

@@ -3,10 +3,13 @@ import UniformTypeIdentifiers
 import UIKit
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = BookLibrary()
     @State private var importing = false
     @State private var settings = false
     @State private var errorMessage: String?
+    @State private var deletionIDs: [UUID] = []
+    @State private var detailBook: ReadingBook?
 
     var body: some View {
         NavigationStack {
@@ -21,16 +24,19 @@ struct ContentView: View {
                                 NavigationLink {
                                     ReaderView(library: library, bookID: book.id)
                                 } label: { bookRow(book) }
+                                    .contextMenu { detailsButton(for: book) }
                             } else if book.state == .failed {
                                 NavigationLink {
                                     ProcessingFailureView(library: library, bookID: book.id)
                                 } label: { bookRow(book) }
+                                    .contextMenu { detailsButton(for: book) }
                             } else {
                                 bookRow(book)
+                                    .contextMenu { detailsButton(for: book) }
                             }
                         }
                         .onDelete { offsets in
-                            for index in offsets { library.delete(library.books[index].id) }
+                            deletionIDs = offsets.map { library.books[$0].id }
                         }
                     }
                 }
@@ -53,13 +59,42 @@ struct ContentView: View {
                 } catch { errorMessage = error.localizedDescription }
             }
             .sheet(isPresented: $settings) {
-                SettingsView().onDisappear { library.resumePending() }
+                SettingsView(library: library).onDisappear { Task { await library.resumePending() } }
+            }
+            .sheet(item: $detailBook) { book in
+                BookDetailsView(library: library, bookID: book.id)
+            }
+            .confirmationDialog(
+                deletionIDs.count == 1 ? "Delete this book?" : "Delete these books?",
+                isPresented: Binding(
+                    get: { !deletionIDs.isEmpty },
+                    set: { if !$0 { deletionIDs = [] } }
+                ), titleVisibility: .visible
+            ) {
+                Button("Delete permanently", role: .destructive) {
+                    for id in deletionIDs { library.delete(id) }
+                    deletionIDs = []
+                }
+            } message: {
+                Text("The PDF and its saved translations will be removed from this device and iCloud.")
             }
             .alert("Could not import PDF", isPresented: Binding(
                 get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
             )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
-            .task { library.resumePending() }
+            .task {
+                await library.resumePending()
+                library.scheduleCloudSync()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    Task { await library.resumePending(); library.scheduleCloudSync() }
+                }
+            }
         }
+    }
+
+    private func detailsButton(for book: ReadingBook) -> some View {
+        Button("Book details", systemImage: "info.circle") { detailBook = book }
     }
 
     private func bookRow(_ book: ReadingBook) -> some View {
@@ -161,6 +196,7 @@ private struct ProcessingFailureView: View {
 }
 
 struct SettingsView: View {
+    @ObservedObject var library: BookLibrary
     @Environment(\.dismiss) private var dismiss
     @AppStorage("geminiModel") private var model = AppConfiguration.defaultModel.rawValue
     @AppStorage("geminiInstructions") private var instructions = AppConfiguration.defaultInstructions
@@ -190,6 +226,10 @@ struct SettingsView: View {
                 Section {
                     Text("PDF text is sent to Google's Gemini API during preparation. Translations and reading progress are stored on this device.")
                         .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("iCloud") {
+                    Text(library.cloudStatus)
+                    Button("Sync now") { library.scheduleCloudSync() }
                 }
             }
             .navigationTitle("Settings")

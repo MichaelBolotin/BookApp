@@ -12,17 +12,13 @@ final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDel
         synthesizer.delegate = self
     }
 
-    func toggle(_ text: String) {
-        if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
-            isSpeaking = false
-        } else {
-            let utterance = AVSpeechUtterance(string: text)
-            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-            utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.86
-            synthesizer.speak(utterance)
-            isSpeaking = true
-        }
+    func speak(_ word: String) {
+        synthesizer.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: word)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.86
+        synthesizer.speak(utterance)
+        isSpeaking = true
     }
 
     func stop() {
@@ -44,6 +40,9 @@ struct ReaderView: View {
     @StateObject private var speech = SpeechController()
     @State private var selected: TranslationSpan?
     @State private var selectedMissingWord: String?
+    @State private var selectedSpokenWord: String?
+    @State private var immersive = false
+    @State private var details = false
     @State private var preferences = false
     @State private var pageChooser = false
     @State private var targetPage = "1"
@@ -68,6 +67,7 @@ struct ReaderView: View {
                                                        theme: theme)) { index in
                     selected = page.translations.first { $0.contains(index) }
                     selectedMissingWord = selected == nil ? page.words[index].text : nil
+                    selectedSpokenWord = page.words[index].text
                 }
                 .background(Color(uiColor: ReaderStyle(fontName: font, fontSize: fontSize, wordSpacing: wordSpacing, lineSpacing: lineSpacing, theme: theme).background))
                 .safeAreaInset(edge: .bottom) {
@@ -80,41 +80,61 @@ struct ReaderView: View {
                                 Text(selected.hebrew)
                                     .font(.title3.bold())
                                     .environment(\.layoutDirection, .rightToLeft)
+                                speechButton
                             }
                             .padding(14)
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                         } else if let selectedMissingWord {
-                            Text("No saved translation for “\(selectedMissingWord)”.")
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            HStack {
+                                Text("No saved translation for “\(selectedMissingWord)”.")
+                                Spacer()
+                                speechButton
+                            }
                                 .padding(14)
                                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                         }
-                        HStack {
-                            Button("Previous page", systemImage: "chevron.left") { changePage(to: book.currentPage - 1) }
-                                .disabled(book.currentPage == 0)
-                            Spacer()
-                            Button("Page \(book.currentPage + 1) of \(book.pages.count)") {
-                                targetPage = String(book.currentPage + 1)
-                                pageChooser = true
+                        if !immersive {
+                            HStack {
+                                Button("Previous page", systemImage: "chevron.left") { changePage(to: book.currentPage - 1) }
+                                    .disabled(book.currentPage == 0)
+                                Spacer()
+                                Button("Page \(book.currentPage + 1) of \(book.pages.count)") {
+                                    targetPage = String(book.currentPage + 1)
+                                    pageChooser = true
+                                }
+                                .monospacedDigit()
+                                Spacer()
+                                Button("Next page", systemImage: "chevron.right") { changePage(to: book.currentPage + 1) }
+                                    .disabled(book.currentPage + 1 >= book.pages.count)
                             }
-                            .monospacedDigit()
-                            Spacer()
-                            Button("Next page", systemImage: "chevron.right") { changePage(to: book.currentPage + 1) }
-                                .disabled(book.currentPage + 1 >= book.pages.count)
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.bordered)
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 6)
                 }
                 .toolbar {
                     ToolbarItemGroup(placement: .topBarTrailing) {
-                        Button(speech.isSpeaking ? "Stop reading" : "Read page aloud",
-                               systemImage: speech.isSpeaking ? "stop.fill" : "speaker.wave.2.fill") {
-                            speech.toggle(page.text)
-                        }
+                        Button("Book details", systemImage: "info.circle") { details = true }
                         Button("Reading appearance", systemImage: "textformat.size") { preferences = true }
+                        Button("Hide controls", systemImage: "arrow.down.right.and.arrow.up.left") {
+                            immersive = true
+                        }
                     }
+                }
+                .toolbar(immersive ? .hidden : .visible, for: .navigationBar)
+                .overlay(alignment: .topTrailing) {
+                    if immersive {
+                        Button("Show controls", systemImage: "arrow.up.left.and.arrow.down.right") {
+                            immersive = false
+                        }
+                        .buttonStyle(.bordered)
+                        .padding(8)
+                        .opacity(0.65)
+                    }
+                }
+                .sheet(isPresented: $details) {
+                    BookDetailsView(library: library, bookID: bookID)
                 }
                 .sheet(isPresented: $pageChooser) {
                     NavigationStack {
@@ -175,6 +195,14 @@ struct ReaderView: View {
         speech.stop()
         selected = nil
         selectedMissingWord = nil
+        selectedSpokenWord = nil
         library.setPage(index, in: bookID)
+    }
+
+    private var speechButton: some View {
+        Button("Read selected word aloud", systemImage: "speaker.wave.2.fill") {
+            if let selectedSpokenWord { speech.speak(selectedSpokenWord) }
+        }
+        .buttonStyle(.borderless)
     }
 }
