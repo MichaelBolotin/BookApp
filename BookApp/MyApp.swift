@@ -1,9 +1,8 @@
 import SwiftUI
 
-@main struct MyApp: App {
+@main
+struct BookApp: App {
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
+        WindowGroup { ContentView() }
     }
 }
