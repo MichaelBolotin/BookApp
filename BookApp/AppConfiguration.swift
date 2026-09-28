@@ -30,18 +30,4 @@ enum AppConfiguration {
 
     static let defaultModel: GeminiModel = .flashLite
 
-    /// Editable in Settings. The output contract and validation are enforced in code.
-    static let defaultInstructions = """
-    You are preparing an English reading aid for a Hebrew-speaking learner.
-    Translate EVERY indexed English word in its specific narrative context into short, natural Hebrew.
-    A translation should normally be one Hebrew word. If two adjacent English words form an idiom,
-    phrasal verb, proper name, or fixed expression whose meaning would be misleading separately,
-    also provide ONE shared Hebrew translation for exactly those two words in phrases.
-    Never group three or more words, a full sentence, or unrelated adjacent words.
-    For each word return its GLOBAL index, the exact original English word, and the Hebrew
-    translation. Do not renumber any word when a different word is omitted. Include both
-    words of a phrase as individual entries. Phrase starts are zero-based GLOBAL indexes.
-    Hebrew values must be nonempty, concise, and contain no explanations, punctuation-only values,
-    romanization, or English. Resolve pronouns and inflection from context when possible.
-    """
 }
