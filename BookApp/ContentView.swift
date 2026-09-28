@@ -230,6 +230,7 @@ struct SettingsView: View {
                 Section("iCloud") {
                     Text(library.cloudStatus)
                     Button("Sync now") { library.scheduleCloudSync() }
+                        .disabled(!AppConfiguration.cloudKitEnabled)
                 }
             }
             .navigationTitle("Settings")

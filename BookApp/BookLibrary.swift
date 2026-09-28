@@ -6,10 +6,10 @@ import Security
 @MainActor
 final class BookLibrary: ObservableObject {
     @Published private(set) var books: [ReadingBook] = []
-    @Published private(set) var cloudStatus = "Waiting for iCloud sync"
+    @Published private(set) var cloudStatus = AppConfiguration.cloudKitEnabled
+        ? "Waiting for iCloud sync" : "iCloud sync is not enabled in this build. Books stay on this device."
 
     private let directory: URL
-    private let cloud = CloudBookSync()
     private var tombstones: [UUID: Date] = [:]
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
@@ -233,6 +233,7 @@ final class BookLibrary: ObservableObject {
     }
 
     func scheduleCloudSync() {
+        guard AppConfiguration.cloudKitEnabled else { return }
         guard syncTask == nil else { syncAgain = true; return }
         syncTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
@@ -246,8 +247,14 @@ final class BookLibrary: ObservableObject {
     }
 
     func syncCloud() async {
+        guard AppConfiguration.cloudKitEnabled else {
+            cloudStatus = "iCloud sync is not enabled in this build. Books stay on this device."
+            return
+        }
         cloudStatus = "Syncing with iCloud…"
         do {
+            // Do not construct CKContainer in builds without the iCloud entitlement.
+            let cloud = CloudBookSync()
             let remote = try await cloud.fetchAll()
             var remoteIDs = Set<UUID>()
             for item in remote {
