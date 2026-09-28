@@ -28,10 +28,10 @@ enum AppConfiguration {
     Translate EVERY indexed English word in its specific narrative context into short, natural Hebrew.
     A translation should normally be one Hebrew word. If two adjacent English words form an idiom,
     phrasal verb, proper name, or fixed expression whose meaning would be misleading separately,
-    return ONE shared Hebrew translation for exactly those two words. Never group three or more words,
-    a full sentence, or unrelated adjacent words. Do not translate the surrounding context separately.
-    Preserve the indexed word order. Return an item for each word, or one item covering a two-word
-    expression; cover every index exactly once. Start and end are inclusive, zero-based LOCAL indexes.
+    also provide ONE shared Hebrew translation for exactly those two words in phrases.
+    Never group three or more words, a full sentence, or unrelated adjacent words.
+    Preserve the indexed word order: translations must contain one entry for EVERY indexed word,
+    including both words of each phrase. Phrase starts are zero-based GLOBAL indexes.
     Hebrew values must be nonempty, concise, and contain no explanations, punctuation-only values,
     romanization, or English. Resolve pronouns and inflection from context when possible.
     """

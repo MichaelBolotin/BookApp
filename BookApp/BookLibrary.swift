@@ -43,14 +43,40 @@ final class BookLibrary: ObservableObject {
     }
 
     func resumePending() {
-        for book in books where book.state == .processing { resume(book.id) }
+        for candidate in books where candidate.state == .processing && jobs[candidate.id] == nil {
+            var book = candidate
+            if book.rawResponse != nil {
+                resume(book.id) // Reuse the saved response without a network call.
+            } else {
+                book.state = .failed
+                book.errorMessage = "The previous request was interrupted before its result was saved. Its outcome is unknown. Send a new request explicitly if you want to try again."
+                try? replace(book)
+            }
+        }
     }
 
     func resume(_ id: UUID) {
-        guard jobs[id] == nil, let book = books.first(where: { $0.id == id }), book.state != .ready else { return }
+        guard jobs[id] == nil, let book = books.first(where: { $0.id == id }),
+              book.state == .processing else { return }
         jobs[id] = Task { [weak self] in
             await self?.process(id)
             self?.jobs[id] = nil
+        }
+    }
+
+    func retry(_ id: UUID) {
+        guard jobs[id] == nil, var book = books.first(where: { $0.id == id }),
+              book.state == .failed else { return }
+        book.rawResponse = nil
+        book.errorMessage = nil
+        book.state = .processing
+        do {
+            try replace(book)
+            resume(id)
+        } catch {
+            book.state = .failed
+            book.errorMessage = error.localizedDescription
+            try? replace(book)
         }
     }
 
@@ -70,36 +96,24 @@ final class BookLibrary: ObservableObject {
 
     private func process(_ id: UUID) async {
         guard var book = books.first(where: { $0.id == id }) else { return }
-        book.state = .processing
-        book.errorMessage = nil
         do {
-            try replace(book)
             let translator = GeminiTranslator(apiKey: SettingsStore.apiKey,
                                               model: SettingsStore.model,
                                               instructions: SettingsStore.instructions)
-            for pageIndex in book.pages.indices {
-                let words = book.pages[pageIndex].words
-                for start in stride(from: 0, to: words.count, by: TranslationBatch.wordLimit) {
-                    try Task.checkCancellation()
-                    if book.pages[pageIndex].completedChunkStarts.contains(start) { continue }
-                    let end = min(start + TranslationBatch.wordLimit, words.count)
-                    let batch = Array(words[start..<end])
-                    let contextStart = max(0, batch[0].location - 300)
-                    let last = batch[batch.count - 1]
-                    let contextEnd = min((book.pages[pageIndex].text as NSString).length,
-                                         last.location + last.length + 300)
-                    let context = (book.pages[pageIndex].text as NSString)
-                        .substring(with: NSRange(location: contextStart, length: contextEnd - contextStart))
-                    let translated = try await translator.translate(words: batch, context: context)
-                    try Task.checkCancellation()
-                    book.pages[pageIndex].translations += translated.map {
-                        TranslationSpan(start: $0.start + start, end: $0.end + start, hebrew: $0.hebrew)
-                    }
-                    book.pages[pageIndex].completedChunkStarts.append(start)
-                    try replace(book) // Durable checkpoint, before sending the next paid request.
-                }
+            if book.rawResponse == nil {
+                // Import and interrupted jobs make one request for the entire book.
+                let raw = try await translator.requestTranslation(for: book.pages)
+                book.rawResponse = raw
+                try replace(book) // Keep the paid response before attempting any parsing.
+            }
+            let translated = try GeminiTranslator.parse(book.rawResponse!, pages: book.pages)
+            try Task.checkCancellation()
+            for index in book.pages.indices {
+                book.pages[index].translations = translated[index]
+                book.pages[index].completedChunkStarts = []
             }
             book.state = .ready
+            book.errorMessage = nil
             try replace(book)
         } catch is CancellationError {
             return

@@ -36,19 +36,9 @@ struct ReadingBook: Codable, Identifiable {
     var pages: [ReadingPage]
     var state: ProcessingState
     var errorMessage: String?
+    /// Complete successful HTTP response, saved before decoding so relaunch never resends it.
+    var rawResponse: String? = nil
     var currentPage: Int = 0
-
-    var totalChunks: Int { pages.reduce(0) { $0 + $1.words.count.chunksNeeded } }
-    var completedChunks: Int { pages.reduce(0) { $0 + $1.completedChunkStarts.count } }
-    var progress: Double { totalChunks == 0 ? 1 : Double(completedChunks) / Double(totalChunks) }
-}
-
-enum TranslationBatch {
-    static let wordLimit = 80
-}
-
-private extension Int {
-    var chunksNeeded: Int { (self + TranslationBatch.wordLimit - 1) / TranslationBatch.wordLimit }
 }
 
 enum WordTokenizer {

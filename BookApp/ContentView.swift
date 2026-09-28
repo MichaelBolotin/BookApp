@@ -7,7 +7,6 @@ struct ContentView: View {
     @State private var importing = false
     @State private var settings = false
     @State private var errorMessage: String?
-    @State private var errorBook: ReadingBook?
 
     var body: some View {
         NavigationStack {
@@ -22,15 +21,12 @@ struct ContentView: View {
                                 NavigationLink {
                                     ReaderView(library: library, bookID: book.id)
                                 } label: { bookRow(book) }
+                            } else if book.state == .failed {
+                                NavigationLink {
+                                    ProcessingFailureView(library: library, bookID: book.id)
+                                } label: { bookRow(book) }
                             } else {
                                 bookRow(book)
-                                    .contextMenu {
-                                        if book.state == .failed {
-                                            Button("Resume processing", systemImage: "arrow.clockwise") {
-                                                library.resume(book.id)
-                                            }
-                                        }
-                                    }
                             }
                         }
                         .onDelete { offsets in
@@ -59,29 +55,6 @@ struct ContentView: View {
             .sheet(isPresented: $settings) {
                 SettingsView().onDisappear { library.resumePending() }
             }
-            .sheet(item: $errorBook) { book in
-                NavigationStack {
-                    ScrollView {
-                        Text(book.errorMessage ?? "Processing stopped without an error message.")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding()
-                    }
-                    .navigationTitle("Processing error")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("Copy error") {
-                                UIPasteboard.general.string = book.errorMessage
-                            }
-                        }
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Done") { errorBook = nil }
-                        }
-                    }
-                }
-                .presentationDetents([.medium, .large])
-            }
             .alert("Could not import PDF", isPresented: Binding(
                 get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
             )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
@@ -100,20 +73,55 @@ struct ContentView: View {
                 Text("\(book.pages.count) pages").font(.subheadline).foregroundStyle(.secondary)
                 switch book.state {
                 case .processing:
-                    ProgressView(value: book.progress)
-                    Text("Preparing \(book.completedChunks) of \(book.totalChunks) batches")
+                    ProgressView()
+                    Text("Preparing the entire book in one request")
                         .font(.caption).foregroundStyle(.secondary)
                 case .failed:
-                    Button("View full error") { errorBook = book }
-                        .font(.caption).foregroundStyle(.red)
-                    Button("Resume processing") { library.resume(book.id) }.font(.caption)
+                    Text("View processing error").font(.caption).foregroundStyle(.red)
                 case .ready:
                     Text("Ready to read").font(.caption).foregroundStyle(.green)
                 }
             }
         }
         .padding(.vertical, 5)
-        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct ProcessingFailureView: View {
+    @ObservedObject var library: BookLibrary
+    let bookID: UUID
+
+    var body: some View {
+        Group {
+            if let book = library.books.first(where: { $0.id == bookID }) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text(book.errorMessage ?? "Processing stopped without an error message.")
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if book.state == .failed {
+                            Button("Send one new Gemini request") { library.retry(bookID) }
+                                .buttonStyle(.borderedProminent)
+                            Text("This sends the entire book again and may incur an API charge.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        } else if book.state == .processing {
+                            ProgressView("Preparing the book")
+                        } else {
+                            Text("Ready to read").foregroundStyle(.green)
+                        }
+                    }
+                    .padding()
+                }
+                .navigationTitle("Processing error")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Copy error") { UIPasteboard.general.string = book.errorMessage }
+                            .disabled(book.errorMessage == nil)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -135,7 +143,7 @@ struct SettingsView: View {
                             Text(option.title).tag(option.rawValue)
                         }
                     }
-                    Text("The key is stored in this device's Keychain. Each book is processed once; resuming uses the current model and instructions for unfinished batches.")
+                    Text("The key is stored in this device's Keychain. The entire book is sent in one request. A failed request is retried only when you choose to send it again.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Translation instructions") {
