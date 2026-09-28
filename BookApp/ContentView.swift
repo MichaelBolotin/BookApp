@@ -15,7 +15,7 @@ struct ContentView: View {
             Group {
                 if library.books.isEmpty {
                     ContentUnavailableView("Your reading library", systemImage: "books.vertical",
-                                           description: Text("Add an English PDF, then tap a word to translate it."))
+                                           description: Text("Add an English PDF or paste text, then tap a word to translate it."))
                 } else {
                     List {
                         ForEach(library.books) { book in
@@ -35,7 +35,11 @@ struct ContentView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Settings", systemImage: "gearshape") { settings = true }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Paste text", systemImage: "doc.on.clipboard") {
+                        do { try library.importPastedText() }
+                        catch { errorMessage = error.localizedDescription }
+                    }
                     Button("Add PDF", systemImage: "plus") { importing = true }
                 }
             }
@@ -65,9 +69,9 @@ struct ContentView: View {
                     deletionIDs = []
                 }
             } message: {
-                Text("The PDF and its saved translations will be removed from this device and iCloud.")
+                Text("The book and its saved translations will be removed from this device and iCloud.")
             }
-            .alert("Could not import PDF", isPresented: Binding(
+            .alert("Could not add book", isPresented: Binding(
                 get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
             )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
             .task {
@@ -125,7 +129,7 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section {
-                    Text("Importing a PDF does not send it to Gemini. A tapped word and its nearby context are sent when you request its translation. Saved translations and reading progress are stored on this device.")
+                    Text("Importing a PDF or pasting text does not send it to Gemini. A tapped word and its nearby context are sent when you request its translation. Books, saved translations, and reading progress are stored on this device.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("iCloud") {
