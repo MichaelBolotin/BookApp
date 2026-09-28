@@ -37,7 +37,7 @@ final class CloudBookSync {
         return records
     }
 
-    func upload(_ book: ReadingBook, snapshotURL: URL, pdfURL: URL) async throws {
+    func upload(_ book: ReadingBook, snapshotURL: URL, pdfURL: URL?) async throws {
         let id = CKRecord.ID(recordName: book.id.uuidString)
         let record = try await existingRecord(for: id) ?? CKRecord(recordType: recordType, recordID: id)
         let remoteDate = (record["modifiedAt"] as? Date) ?? .distantPast
@@ -46,7 +46,7 @@ final class CloudBookSync {
         try FileManager.default.copyItem(at: snapshotURL, to: staged)
         defer { try? FileManager.default.removeItem(at: staged) }
         record["snapshot"] = CKAsset(fileURL: staged)
-        if record["pdf"] == nil { record["pdf"] = CKAsset(fileURL: pdfURL) }
+        if record["pdf"] == nil, let pdfURL { record["pdf"] = CKAsset(fileURL: pdfURL) }
         record["modifiedAt"] = (book.modifiedAt ?? book.addedAt) as NSDate
         record["deleted"] = NSNumber(value: false)
         _ = try await database.save(record)
