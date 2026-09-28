@@ -159,7 +159,12 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .toolbar { Button("Done") { SettingsStore.apiKey = apiKey; dismiss() } }
-            .onAppear { apiKey = SettingsStore.apiKey }
+            .onAppear {
+                apiKey = SettingsStore.apiKey
+                if instructions.contains("zero-based LOCAL indexes.") {
+                    instructions = AppConfiguration.defaultInstructions
+                }
+            }
         }
     }
 }

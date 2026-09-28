@@ -175,6 +175,8 @@ enum SettingsStore {
     }
     static var instructions: String {
         let saved = UserDefaults.standard.string(forKey: "geminiInstructions") ?? ""
+        // The previous default instructed Gemini to omit one item for a two-word phrase.
+        if saved.contains("zero-based LOCAL indexes.") { return AppConfiguration.defaultInstructions }
         return saved.isEmpty ? AppConfiguration.defaultInstructions : saved
     }
 }
