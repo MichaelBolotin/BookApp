@@ -13,4 +13,8 @@ The app copies the source PDF and stores extracted pages, word positions, transl
 
 The REST integration uses `generateContent` with JSON structured output. It requests exactly one translation per indexed word, plus optional two-word phrases. The response is saved before validation and all words are checked before the book becomes readable. To fit a single model response, imports above 6,000 English words stop before an API call with a clear error. Processing runs while the app is active; iOS may suspend it in the background. A saved response is parsed again at the next launch without another request. If a request was interrupted before its response was saved, its outcome is unknown and only an explicit retry sends the book again. Translations may still be imperfect.
 
+If Gemini returns HTTP 503 due to temporary high demand, the error screen offers a model picker. Wait or select another Gemini model, then explicitly send one new request. Changing the model alone does not send data; server capacity cannot be guaranteed by the app.
+
+For HTTP request errors such as 400, the error screen retains the full Gemini response, model name, and word count. Copy the complete error for diagnosis. The JSON schema stays small; exact word count and phrase coverage are validated locally after the response arrives.
+
 For personal use the key stays on this device. Do not commit a key in source control. A distributed app needs a backend to protect the key. The repository does not include a real key.

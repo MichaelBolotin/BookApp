@@ -89,6 +89,7 @@ struct ContentView: View {
 
 private struct ProcessingFailureView: View {
     @ObservedObject var library: BookLibrary
+    @AppStorage("geminiModel") private var model = AppConfiguration.defaultModel.rawValue
     let bookID: UUID
 
     var body: some View {
@@ -100,9 +101,18 @@ private struct ProcessingFailureView: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         if book.state == .failed {
+                            if book.errorMessage?.contains("HTTP 503:") == true {
+                                Text("Gemini is temporarily overloaded. Wait and try later, or choose another model below. No translation was returned or saved.")
+                                    .foregroundStyle(.secondary)
+                            }
+                            Picker("Model for the next request", selection: $model) {
+                                ForEach(AppConfiguration.GeminiModel.allCases) { option in
+                                    Text(option.title).tag(option.rawValue)
+                                }
+                            }
                             Button("Send one new Gemini request") { library.retry(bookID) }
                                 .buttonStyle(.borderedProminent)
-                            Text("This sends the entire book again and may incur an API charge.")
+                            Text("This sends the entire book to the selected model in one request and may incur an API charge. Nothing is sent when you open this screen or change the model.")
                                 .font(.footnote).foregroundStyle(.secondary)
                         } else if book.state == .processing {
                             ProgressView("Preparing the book")

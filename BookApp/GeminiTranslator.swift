@@ -49,8 +49,8 @@ struct GeminiTranslator {
         """
         let schema: [String: Any] = [
             "type": "object", "properties": [
-                "translations": ["type": "array", "minItems": count, "maxItems": count,
-                                 "items": ["type": "string"]],
+                // Keep the remote schema small; verify exact length in parse(_:pages:).
+                "translations": ["type": "array", "items": ["type": "string"]],
                 "phrases": ["type": "array", "items": [
                     "type": "object", "properties": [
                         "start": ["type": "integer"], "hebrew": ["type": "string"]
@@ -76,10 +76,10 @@ struct GeminiTranslator {
             throw TranslationError.invalidResponse("No HTTP response.")
         }
         guard (200..<300).contains(http.statusCode) else {
-            let detail = (try? JSONDecoder().decode(APIError.self, from: data).error.message)
-                ?? String(data: data, encoding: .utf8)
+            let bodyText = String(data: data, encoding: .utf8) ?? "<non-UTF-8 response>"
+            let message = (try? JSONDecoder().decode(APIError.self, from: data).error.message)
                 ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-            throw TranslationError.api("HTTP \(http.statusCode): \(detail)")
+            throw TranslationError.api("HTTP \(http.statusCode): \(message)\n\nModel: \(model.rawValue)\nWords: \(count)\nFull server response:\n\(bodyText)")
         }
         guard let raw = String(data: data, encoding: .utf8) else {
             throw TranslationError.invalidResponse("HTTP response was not UTF-8.")
