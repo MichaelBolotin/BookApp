@@ -43,6 +43,7 @@ struct ReaderView: View {
     let bookID: UUID
     @StateObject private var speech = SpeechController()
     @State private var selected: TranslationSpan?
+    @State private var selectedMissingWord: String?
     @State private var preferences = false
     @State private var pageChooser = false
     @State private var targetPage = "1"
@@ -66,6 +67,7 @@ struct ReaderView: View {
                                                        wordSpacing: wordSpacing, lineSpacing: lineSpacing,
                                                        theme: theme)) { index in
                     selected = page.translations.first { $0.contains(index) }
+                    selectedMissingWord = selected == nil ? page.words[index].text : nil
                 }
                 .background(Color(uiColor: ReaderStyle(fontName: font, fontSize: fontSize, wordSpacing: wordSpacing, lineSpacing: lineSpacing, theme: theme).background))
                 .safeAreaInset(edge: .bottom) {
@@ -81,6 +83,11 @@ struct ReaderView: View {
                             }
                             .padding(14)
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                        } else if let selectedMissingWord {
+                            Text("No saved translation for “\(selectedMissingWord)”.")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                         }
                         HStack {
                             Button("Previous page", systemImage: "chevron.left") { changePage(to: book.currentPage - 1) }
@@ -167,6 +174,7 @@ struct ReaderView: View {
     private func changePage(to index: Int) {
         speech.stop()
         selected = nil
+        selectedMissingWord = nil
         library.setPage(index, in: bookID)
     }
 }

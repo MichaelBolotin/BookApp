@@ -38,7 +38,16 @@ struct ReadingBook: Codable, Identifiable {
     var errorMessage: String?
     /// Complete successful HTTP response, saved before decoding so relaunch never resends it.
     var rawResponse: String? = nil
+    /// Earlier paid responses remain available even after an explicit new request.
+    var previousResponses: [String]? = nil
     var currentPage: Int = 0
+
+    var wordCount: Int { pages.reduce(0) { $0 + $1.words.count } }
+    var translatedWordCount: Int {
+        pages.reduce(0) { total, page in
+            total + page.translations.reduce(0) { $0 + $1.end - $1.start + 1 }
+        }
+    }
 }
 
 enum WordTokenizer {

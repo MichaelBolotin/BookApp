@@ -79,7 +79,12 @@ struct ContentView: View {
                 case .failed:
                     Text("View processing error").font(.caption).foregroundStyle(.red)
                 case .ready:
-                    Text("Ready to read").font(.caption).foregroundStyle(.green)
+                    if book.translatedWordCount < book.wordCount {
+                        Text("\(book.translatedWordCount) of \(book.wordCount) words translated")
+                            .font(.caption).foregroundStyle(.orange)
+                    } else {
+                        Text("Ready to read").font(.caption).foregroundStyle(.green)
+                    }
                 }
             }
         }
@@ -100,6 +105,26 @@ private struct ProcessingFailureView: View {
                         Text(book.errorMessage ?? "Processing stopped without an error message.")
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        if let raw = book.rawResponse {
+                            Button("Copy saved Gemini response") { UIPasteboard.general.string = raw }
+                                .buttonStyle(.bordered)
+                            if book.state == .failed {
+                                Button("Check saved response again — free") {
+                                    library.recheckSavedResponse(bookID)
+                                }
+                                .buttonStyle(.bordered)
+                                Text("This checks the saved response on your iPhone without contacting Gemini.")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                        if let earlier = book.previousResponses {
+                            ForEach(earlier.indices, id: \.self) { index in
+                                Button("Copy earlier Gemini response \(index + 1)") {
+                                    UIPasteboard.general.string = earlier[index]
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
                         if book.state == .failed {
                             if book.errorMessage?.contains("HTTP 503:") == true {
                                 Text("Gemini is temporarily overloaded. Wait and try later, or choose another model below. No translation was returned or saved.")
@@ -171,7 +196,8 @@ struct SettingsView: View {
             .toolbar { Button("Done") { SettingsStore.apiKey = apiKey; dismiss() } }
             .onAppear {
                 apiKey = SettingsStore.apiKey
-                if instructions.contains("zero-based LOCAL indexes.") {
+                if instructions.contains("zero-based LOCAL indexes.")
+                    || instructions.contains("translations must contain one entry for EVERY indexed word") {
                     instructions = AppConfiguration.defaultInstructions
                 }
             }

@@ -30,8 +30,9 @@ enum AppConfiguration {
     phrasal verb, proper name, or fixed expression whose meaning would be misleading separately,
     also provide ONE shared Hebrew translation for exactly those two words in phrases.
     Never group three or more words, a full sentence, or unrelated adjacent words.
-    Preserve the indexed word order: translations must contain one entry for EVERY indexed word,
-    including both words of each phrase. Phrase starts are zero-based GLOBAL indexes.
+    For each word return its GLOBAL index, the exact original English word, and the Hebrew
+    translation. Do not renumber any word when a different word is omitted. Include both
+    words of a phrase as individual entries. Phrase starts are zero-based GLOBAL indexes.
     Hebrew values must be nonempty, concise, and contain no explanations, punctuation-only values,
     romanization, or English. Resolve pronouns and inflection from context when possible.
     """

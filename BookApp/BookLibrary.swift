@@ -67,12 +67,29 @@ final class BookLibrary: ObservableObject {
     func retry(_ id: UUID) {
         guard jobs[id] == nil, var book = books.first(where: { $0.id == id }),
               book.state == .failed else { return }
+        if let raw = book.rawResponse {
+            book.previousResponses = (book.previousResponses ?? []) + [raw]
+        }
         book.rawResponse = nil
         book.errorMessage = nil
         book.state = .processing
         do {
             try replace(book)
             resume(id)
+        } catch {
+            book.state = .failed
+            book.errorMessage = error.localizedDescription
+            try? replace(book)
+        }
+    }
+
+    func recheckSavedResponse(_ id: UUID) {
+        guard jobs[id] == nil, var book = books.first(where: { $0.id == id }),
+              book.state == .failed, book.rawResponse != nil else { return }
+        book.state = .processing
+        do {
+            try replace(book)
+            resume(id) // process parses the saved response without making an HTTP request.
         } catch {
             book.state = .failed
             book.errorMessage = error.localizedDescription
@@ -109,11 +126,12 @@ final class BookLibrary: ObservableObject {
             let translated = try GeminiTranslator.parse(book.rawResponse!, pages: book.pages)
             try Task.checkCancellation()
             for index in book.pages.indices {
-                book.pages[index].translations = translated[index]
+                book.pages[index].translations = translated.pages[index]
                 book.pages[index].completedChunkStarts = []
             }
             book.state = .ready
-            book.errorMessage = nil
+            book.errorMessage = translated.translatedWords == translated.totalWords ? nil
+                : "\(translated.translatedWords) of \(translated.totalWords) words have a saved translation. Untranslated words remain tappable but show a missing-translation message."
             try replace(book)
         } catch is CancellationError {
             return
@@ -176,7 +194,10 @@ enum SettingsStore {
     static var instructions: String {
         let saved = UserDefaults.standard.string(forKey: "geminiInstructions") ?? ""
         // The previous default instructed Gemini to omit one item for a two-word phrase.
-        if saved.contains("zero-based LOCAL indexes.") { return AppConfiguration.defaultInstructions }
+        if saved.contains("zero-based LOCAL indexes.")
+            || saved.contains("translations must contain one entry for EVERY indexed word") {
+            return AppConfiguration.defaultInstructions
+        }
         return saved.isEmpty ? AppConfiguration.defaultInstructions : saved
     }
 }

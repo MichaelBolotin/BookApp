@@ -8,13 +8,14 @@ struct GeminiTranslator {
     static let maximumWords = 6_000
 
     enum TranslationError: LocalizedError {
-        case missingKey, tooLong(Int), invalidResponse(String), invalidCoverage(String), api(String)
+        case missingKey, tooLong(Int), invalidResponse(String), invalidCoverage(String), legacyUnaligned(Int, Int), api(String)
         var errorDescription: String? {
             switch self {
             case .missingKey: "Add a Gemini API key in Settings before importing a book."
             case .tooLong(let count): "This book has \(count) English words. A single Gemini response can hold at most \(GeminiTranslator.maximumWords) words in this app. No request was sent."
             case .invalidResponse(let detail): "Gemini returned an unusable response: \(detail) The response was saved on this device. A new request requires an explicit retry."
             case .invalidCoverage(let detail): "Gemini did not translate every word correctly: \(detail) The response was saved on this device. A new request requires an explicit retry."
+            case .legacyUnaligned(let expected, let received): "The saved response has \(received) translations for \(expected) words, but the earlier format did not include word indexes. Their positions cannot be recovered safely. The paid response remains saved; do not resend it just to inspect this error."
             case .api(let detail): "Gemini request failed: \(detail)"
             }
         }
@@ -37,11 +38,13 @@ struct GeminiTranslator {
         let prompt = """
         \(instructions)
 
-        Return JSON with exactly \(count) Hebrew translations in the translations array. Array position 0
-        translates indexed word 0, and so on through \(count - 1). Never skip, merge, or reorder an item.
+        Return JSON with one object in translations for each indexed English word. Each object
+        contains index (its GLOBAL number above), english (copy that exact word), and hebrew
+        (its contextual Hebrew translation). Never renumber an index if an item is omitted.
+        Include as many valid entries as possible, even if you cannot provide every translation.
         For a meaningful expression of EXACTLY two adjacent English words, also add a phrases entry
         with the first word's global index and the shared Hebrew translation. The translations array
-        still contains individual Hebrew translations for both words. Only use a phrase when the
+        still contains individual entries for both words. Only use a phrase when the
         two words occur on the same page. No three-word phrases, sentences, or overlapping phrases.
         Keep translations short and contextual. Return no explanations.
 
@@ -50,7 +53,12 @@ struct GeminiTranslator {
         let schema: [String: Any] = [
             "type": "object", "properties": [
                 // Keep the remote schema small; verify exact length in parse(_:pages:).
-                "translations": ["type": "array", "items": ["type": "string"]],
+                "translations": ["type": "array", "items": [
+                    "type": "object", "properties": [
+                        "index": ["type": "integer"], "english": ["type": "string"],
+                        "hebrew": ["type": "string"]
+                    ], "required": ["index", "english", "hebrew"]
+                ]],
                 "phrases": ["type": "array", "items": [
                     "type": "object", "properties": [
                         "start": ["type": "integer"], "hebrew": ["type": "string"]
@@ -87,7 +95,13 @@ struct GeminiTranslator {
         return raw
     }
 
-    static func parse(_ raw: String, pages: [ReadingPage]) throws -> [[TranslationSpan]] {
+    struct ParsedBook {
+        let pages: [[TranslationSpan]]
+        let translatedWords: Int
+        let totalWords: Int
+    }
+
+    static func parse(_ raw: String, pages: [ReadingPage]) throws -> ParsedBook {
         let count = pages.reduce(0) { $0 + $1.words.count }
         let response: GenerateResponse
         do { response = try JSONDecoder().decode(GenerateResponse.self, from: Data(raw.utf8)) }
@@ -102,52 +116,81 @@ struct GeminiTranslator {
             .filter({ $0.thought != true }).compactMap(\.text).joined(), !payload.isEmpty else {
             throw TranslationError.invalidResponse("The candidate contained no text.")
         }
-        let translated: TranslationResponse
-        do { translated = try JSONDecoder().decode(TranslationResponse.self, from: Data(payload.utf8)) }
-        catch { throw TranslationError.invalidResponse("Could not decode translation JSON: \(error.localizedDescription)") }
-        guard translated.translations.count == count else {
-            throw TranslationError.invalidCoverage("Expected \(count) words, received \(translated.translations.count).")
+        let data = Data(payload.utf8)
+        let entries: [TranslationResponse.Entry]
+        let phrases: [TranslationResponse.Phrase]
+        if let old = try? JSONDecoder().decode(LegacyTranslationResponse.self, from: data) {
+            // A shorter unindexed list cannot reveal which words were omitted. Never shift
+            // Hebrew meanings onto potentially different English words.
+            guard old.translations.count == count else {
+                throw TranslationError.legacyUnaligned(count, old.translations.count)
+            }
+            let originalWords = pages.flatMap(\.words)
+            entries = old.translations.enumerated().map { index, hebrew in
+                TranslationResponse.Entry(index: index,
+                    english: originalWords[index].text, hebrew: hebrew)
+            }
+            phrases = old.phrases
+        } else {
+            let translated: TranslationResponse
+            do { translated = try JSONDecoder().decode(TranslationResponse.self, from: data) }
+            catch { throw TranslationError.invalidResponse("Could not decode translation JSON: \(error.localizedDescription)") }
+            entries = translated.translations
+            phrases = translated.phrases
         }
-        let values = translated.translations.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        if let index = values.firstIndex(where: \.isEmpty) {
-            throw TranslationError.invalidCoverage("Translation at index \(index) was empty.")
-        }
-        var result: [[TranslationSpan]] = []
-        var offset = 0
-        for page in pages {
-            result.append(page.words.indices.map { local in
-                TranslationSpan(start: local, end: local, hebrew: values[offset + local])
-            })
-            offset += page.words.count
-        }
+
         var globalToLocal: [(page: Int, word: Int)] = []
         for (pageIndex, page) in pages.enumerated() {
             globalToLocal += page.words.indices.map { (page: pageIndex, word: $0) }
         }
+        var result = pages.map { _ in [Int: TranslationSpan]() }
+        for entry in entries {
+            guard globalToLocal.indices.contains(entry.index) else { continue }
+            let location = globalToLocal[entry.index]
+            let expected = pages[location.page].words[location.word].text
+            let matches = entry.english.lowercased().replacingOccurrences(of: "’", with: "'")
+                == expected.lowercased().replacingOccurrences(of: "’", with: "'")
+            let hebrew = entry.hebrew.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard matches, !hebrew.isEmpty, result[location.page][location.word] == nil else { continue }
+            result[location.page][location.word] =
+                TranslationSpan(start: location.word, end: location.word, hebrew: hebrew)
+        }
         var occupied = Set<Int>()
-        // Replace from highest index so removing a word cannot shift a later phrase.
-        for phrase in translated.phrases.sorted(by: { $0.start > $1.start }) {
+        for phrase in phrases {
             guard phrase.start >= 0, phrase.start < count - 1,
                   !occupied.contains(phrase.start), !occupied.contains(phrase.start + 1),
                   globalToLocal[phrase.start].page == globalToLocal[phrase.start + 1].page,
-                  !phrase.hebrew.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw TranslationError.invalidCoverage("Invalid or overlapping two-word phrase at index \(phrase.start).")
-            }
+                  !phrase.hebrew.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             occupied.insert(phrase.start)
             occupied.insert(phrase.start + 1)
             let location = globalToLocal[phrase.start]
-            result[location.page][location.word] = TranslationSpan(start: location.word, end: location.word + 1,
-                hebrew: phrase.hebrew.trimmingCharacters(in: .whitespacesAndNewlines))
-            result[location.page].remove(at: location.word + 1)
+            result[location.page][location.word + 1] = nil
+            result[location.page][location.word] =
+                TranslationSpan(start: location.word, end: location.word + 1,
+                                hebrew: phrase.hebrew.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return result
+        let ordered = result.map { $0.sorted { $0.key < $1.key }.map { $0.value } }
+        let covered = ordered.flatMap { $0 }.reduce(0) { $0 + $1.end - $1.start + 1 }
+        guard covered > 0 else {
+            throw TranslationError.invalidCoverage("No indexed translations matched the source text.")
+        }
+        return ParsedBook(pages: ordered, translatedWords: covered, totalWords: count)
     }
 }
 
 private struct TranslationResponse: Decodable {
+    struct Entry: Decodable {
+        let index: Int
+        let english: String
+        let hebrew: String
+    }
     struct Phrase: Decodable { let start: Int; let hebrew: String }
-    let translations: [String]
+    let translations: [Entry]
     let phrases: [Phrase]
+}
+private struct LegacyTranslationResponse: Decodable {
+    let translations: [String]
+    let phrases: [TranslationResponse.Phrase]
 }
 private struct GenerateResponse: Decodable {
     struct Candidate: Decodable {
