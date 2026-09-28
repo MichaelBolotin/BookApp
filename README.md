@@ -4,10 +4,14 @@ A personal iPhone/iPad reading aid for English PDFs. Import a text-based PDF, wa
 
 ## Setup
 
-1. Open `BookApp.xcodeproj` in Xcode 26, select your Apple development team, and run on iOS 26 or later. Set a stable, unique bundle identifier on every device. Enable **iCloud → CloudKit** in Signing & Capabilities with the matching `iCloud.<bundle identifier>` container, then sign in with the same Apple Account. Deploy the CloudKit schema to Production before distribution.
+1. Open `BookApp.xcodeproj` in Xcode 26, select your Apple development team, and run on iOS 26 or later. The default target does not request an iCloud entitlement, so it can also be signed by an Xcode Personal Team.
 2. Get a Gemini API key from Google AI Studio. Open Settings in the app and enter the key. It is saved in the device Keychain.
 3. Optionally choose a model and edit the translation instructions in Settings. The defaults and model list live in `BookApp/AppConfiguration.swift`.
 4. Import a PDF with selectable English text. Scanned image PDFs are not yet supported.
+
+### Enable iCloud sync
+
+CloudKit requires a team with the iCloud capability (Apple Developer Program membership). A free Xcode Personal Team cannot sign the app with this entitlement. With an eligible team, set a stable, unique bundle identifier **before** creating the iCloud container; changing the identifier later creates a different installed app and does not automatically migrate its locally stored books. In Signing & Capabilities, add **iCloud → CloudKit** and select the matching `iCloud.<bundle identifier>` container. Xcode can create the entitlement or you can point `CODE_SIGN_ENTITLEMENTS` for both target configurations to the provided `BookApp/BookApp.entitlements`. The selected container must exist for your team. Deploy its CloudKit schema to Production before distribution, then sign in with the same Apple Account on each device. Until this capability is enabled, books remain local and Settings will report iCloud sync as unavailable.
 
 The app copies the source PDF and stores extracted pages, word positions, translations, the raw Gemini response, and reading position in Application Support on this device. Completed books and PDFs sync to the private iCloud database when CloudKit is available. Settings shows the sync status and offers **Sync now**. The original PDF is retained locally; the extracted text of the entire book is sent in one Gemini request. The same file's SHA-256 prevents accidental duplicate import. Tap a failed book to read the full error; only the explicit retry button sends a new request. Swipe a book to delete it after confirmation; the removal syncs to iCloud. A successful book is never sent again during reading. Select a word, then tap its speaker button for free iOS speech of that word. **Hide controls** clears the reader navigation and page controls while keeping the translation card accessible.
 

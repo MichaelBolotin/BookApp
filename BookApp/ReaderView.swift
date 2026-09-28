@@ -57,138 +57,161 @@ struct ReaderView: View {
         guard let book, book.pages.indices.contains(book.currentPage) else { return nil }
         return book.pages[book.currentPage]
     }
+    private var style: ReaderStyle {
+        ReaderStyle(fontName: font, fontSize: fontSize, wordSpacing: wordSpacing,
+                    lineSpacing: lineSpacing, theme: theme)
+    }
 
     var body: some View {
         Group {
             if let book, let page {
-                InteractiveTextView(page: page, selection: selected,
-                                    style: ReaderStyle(fontName: font, fontSize: fontSize,
-                                                       wordSpacing: wordSpacing, lineSpacing: lineSpacing,
-                                                       theme: theme)) { index in
-                    selected = page.translations.first { $0.contains(index) }
-                    selectedMissingWord = selected == nil ? page.words[index].text : nil
-                    selectedSpokenWord = page.words[index].text
-                }
-                .background(Color(uiColor: ReaderStyle(fontName: font, fontSize: fontSize, wordSpacing: wordSpacing, lineSpacing: lineSpacing, theme: theme).background))
-                .safeAreaInset(edge: .bottom) {
-                    VStack(spacing: 8) {
-                        if let selected {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(page.words[selected.start...selected.end].map(\.text).joined(separator: " "))
-                                    .font(.headline)
-                                Spacer()
-                                Text(selected.hebrew)
-                                    .font(.title3.bold())
-                                    .environment(\.layoutDirection, .rightToLeft)
-                                speechButton
-                            }
-                            .padding(14)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-                        } else if let selectedMissingWord {
-                            HStack {
-                                Text("No saved translation for “\(selectedMissingWord)”.")
-                                Spacer()
-                                speechButton
-                            }
-                                .padding(14)
-                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-                        }
-                        if !immersive {
-                            HStack {
-                                Button("Previous page", systemImage: "chevron.left") { changePage(to: book.currentPage - 1) }
-                                    .disabled(book.currentPage == 0)
-                                Spacer()
-                                Button("Page \(book.currentPage + 1) of \(book.pages.count)") {
-                                    targetPage = String(book.currentPage + 1)
-                                    pageChooser = true
-                                }
-                                .monospacedDigit()
-                                Spacer()
-                                Button("Next page", systemImage: "chevron.right") { changePage(to: book.currentPage + 1) }
-                                    .disabled(book.currentPage + 1 >= book.pages.count)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.bottom, 6)
-                }
-                .toolbar {
-                    ToolbarItemGroup(placement: .topBarTrailing) {
-                        Button("Book details", systemImage: "info.circle") { details = true }
-                        Button("Reading appearance", systemImage: "textformat.size") { preferences = true }
-                        Button("Hide controls", systemImage: "arrow.down.right.and.arrow.up.left") {
-                            immersive = true
-                        }
-                    }
-                }
-                .toolbar(immersive ? .hidden : .visible, for: .navigationBar)
-                .overlay(alignment: .topTrailing) {
-                    if immersive {
-                        Button("Show controls", systemImage: "arrow.up.left.and.arrow.down.right") {
-                            immersive = false
-                        }
-                        .buttonStyle(.bordered)
-                        .padding(8)
-                        .opacity(0.65)
-                    }
-                }
-                .sheet(isPresented: $details) {
-                    BookDetailsView(library: library, bookID: bookID)
-                }
-                .sheet(isPresented: $pageChooser) {
-                    NavigationStack {
-                        Form {
-                            TextField("Page number", text: $targetPage)
-                                .keyboardType(.numberPad)
-                            Text("Enter a page from 1 to \(book.pages.count).")
-                                .foregroundStyle(.secondary)
-                        }
-                        .navigationTitle("Go to page")
-                        .toolbar {
-                            Button("Go") {
-                                if let number = Int(targetPage), (1...book.pages.count).contains(number) {
-                                    changePage(to: number - 1)
-                                    pageChooser = false
-                                }
-                            }
-                            .disabled(Int(targetPage).map { !(1...book.pages.count).contains($0) } ?? true)
-                        }
-                    }
-                    .presentationDetents([.medium])
-                }
-                .sheet(isPresented: $preferences) {
-                    NavigationStack {
-                        Form {
-                            Picker("Font", selection: $font) {
-                                Text("System").tag("system")
-                                Text("Serif").tag("serif")
-                                Text("Rounded").tag("rounded")
-                                Text("Monospaced").tag("mono")
-                            }
-                            Slider(value: $fontSize, in: 14...34, step: 1) { Text("Font size") }
-                            Text("Font size: \(Int(fontSize))")
-                            Slider(value: $wordSpacing, in: 0...12, step: 1) { Text("Word spacing") }
-                            Text("Word spacing: \(Int(wordSpacing))")
-                            Slider(value: $lineSpacing, in: 0...20, step: 1) { Text("Line spacing") }
-                            Text("Line spacing: \(Int(lineSpacing))")
-                            Picker("Background", selection: $theme) {
-                                Text("Warm paper").tag("sepia")
-                                Text("White").tag("white")
-                                Text("Dark").tag("dark")
-                            }
-                        }
-                        .navigationTitle("Reading appearance")
-                        .toolbar { Button("Done") { preferences = false } }
-                    }
-                }
-                .onDisappear { speech.stop() }
+                reader(book: book, page: page)
             } else {
                 ContentUnavailableView("Book unavailable", systemImage: "book.closed")
             }
         }
         .navigationTitle(book?.title ?? "Reader")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func reader(book: ReadingBook, page: ReadingPage) -> some View {
+        readingText(page)
+            .safeAreaInset(edge: .bottom) { footer(book: book, page: page) }
+            .toolbar { readerToolbar }
+            .toolbar(immersive ? .hidden : .visible, for: .navigationBar)
+            .overlay(alignment: .topTrailing) { revealControlsButton }
+            .sheet(isPresented: $details) { BookDetailsView(library: library, bookID: bookID) }
+            .sheet(isPresented: $pageChooser) { pageSelection(book: book) }
+            .sheet(isPresented: $preferences) { appearanceSettings }
+            .onDisappear { speech.stop() }
+    }
+
+    private func readingText(_ page: ReadingPage) -> some View {
+        InteractiveTextView(page: page, selection: selected, style: style) { index in
+            selected = page.translations.first { $0.contains(index) }
+            selectedMissingWord = selected == nil ? page.words[index].text : nil
+            selectedSpokenWord = page.words[index].text
+        }
+        .background(Color(uiColor: style.background))
+    }
+
+    private func footer(book: ReadingBook, page: ReadingPage) -> some View {
+        VStack(spacing: 8) {
+            selectionCard(page: page)
+            if !immersive { pageControls(book: book) }
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 6)
+    }
+
+    @ViewBuilder
+    private func selectionCard(page: ReadingPage) -> some View {
+        if let selected {
+            HStack(alignment: .firstTextBaseline) {
+                Text(page.words[selected.start...selected.end].map(\.text).joined(separator: " "))
+                    .font(.headline)
+                Spacer()
+                Text(selected.hebrew)
+                    .font(.title3.bold())
+                    .environment(\.layoutDirection, .rightToLeft)
+                speechButton
+            }
+            .padding(14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        } else if let selectedMissingWord {
+            HStack {
+                Text("No saved translation for “\(selectedMissingWord)”.")
+                Spacer()
+                speechButton
+            }
+            .padding(14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    private func pageControls(book: ReadingBook) -> some View {
+        HStack {
+            Button("Previous page", systemImage: "chevron.left") { changePage(to: book.currentPage - 1) }
+                .disabled(book.currentPage == 0)
+            Spacer()
+            Button("Page \(book.currentPage + 1) of \(book.pages.count)") {
+                targetPage = String(book.currentPage + 1)
+                pageChooser = true
+            }
+            .monospacedDigit()
+            Spacer()
+            Button("Next page", systemImage: "chevron.right") { changePage(to: book.currentPage + 1) }
+                .disabled(book.currentPage + 1 >= book.pages.count)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    @ToolbarContentBuilder
+    private var readerToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button("Book details", systemImage: "info.circle") { details = true }
+            Button("Reading appearance", systemImage: "textformat.size") { preferences = true }
+            Button("Hide controls", systemImage: "arrow.down.right.and.arrow.up.left") { immersive = true }
+        }
+    }
+
+    @ViewBuilder
+    private var revealControlsButton: some View {
+        if immersive {
+            Button("Show controls", systemImage: "arrow.up.left.and.arrow.down.right") {
+                immersive = false
+            }
+            .buttonStyle(.bordered)
+            .padding(8)
+            .opacity(0.65)
+        }
+    }
+
+    private func pageSelection(book: ReadingBook) -> some View {
+        NavigationStack {
+            Form {
+                TextField("Page number", text: $targetPage).keyboardType(.numberPad)
+                Text("Enter a page from 1 to \(book.pages.count).")
+                    .foregroundStyle(.secondary)
+            }
+            .navigationTitle("Go to page")
+            .toolbar {
+                Button("Go") {
+                    if let number = Int(targetPage), (1...book.pages.count).contains(number) {
+                        changePage(to: number - 1)
+                        pageChooser = false
+                    }
+                }
+                .disabled(Int(targetPage).map { !(1...book.pages.count).contains($0) } ?? true)
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private var appearanceSettings: some View {
+        NavigationStack {
+            Form {
+                Picker("Font", selection: $font) {
+                    Text("System").tag("system")
+                    Text("Serif").tag("serif")
+                    Text("Rounded").tag("rounded")
+                    Text("Monospaced").tag("mono")
+                }
+                Slider(value: $fontSize, in: 14...34, step: 1) { Text("Font size") }
+                Text("Font size: \(Int(fontSize))")
+                Slider(value: $wordSpacing, in: 0...12, step: 1) { Text("Word spacing") }
+                Text("Word spacing: \(Int(wordSpacing))")
+                Slider(value: $lineSpacing, in: 0...20, step: 1) { Text("Line spacing") }
+                Text("Line spacing: \(Int(lineSpacing))")
+                Picker("Background", selection: $theme) {
+                    Text("Warm paper").tag("sepia")
+                    Text("White").tag("white")
+                    Text("Dark").tag("dark")
+                }
+            }
+            .navigationTitle("Reading appearance")
+            .toolbar { Button("Done") { preferences = false } }
+        }
     }
 
     private func changePage(to index: Int) {
