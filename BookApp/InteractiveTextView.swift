@@ -64,6 +64,28 @@ struct InteractiveTextView: UIViewRepresentable {
                 .font: style.font, .foregroundColor: style.foreground, .paragraphStyle: paragraph
             ])
             let full = NSRange(location: 0, length: (page.text as NSString).length)
+            for span in page.formatting ?? [] {
+                let range = NSRange(location: span.location, length: span.length)
+                guard range.length > 0, NSMaxRange(range) <= full.length else { continue }
+                switch span.kind {
+                case .title, .heading:
+                    let scale: CGFloat = span.kind == .title ? 1.55 : 1.25
+                    let weight: UIFont.Weight = span.kind == .title ? .bold : .semibold
+                    attributed.addAttribute(.font,
+                        value: UIFont.systemFont(ofSize: style.fontSize * scale, weight: weight),
+                        range: range)
+                    let headingParagraph = paragraph.mutableCopy() as! NSMutableParagraphStyle
+                    headingParagraph.paragraphSpacingBefore = style.fontSize * 0.7
+                    headingParagraph.paragraphSpacing = style.fontSize * 0.5
+                    attributed.addAttribute(.paragraphStyle, value: headingParagraph, range: range)
+                case .bold, .italic:
+                    let trait: UIFontDescriptor.SymbolicTraits = span.kind == .bold ? .traitBold : .traitItalic
+                    let descriptor = style.font.fontDescriptor.withSymbolicTraits(trait)
+                    let font = descriptor.map { UIFont(descriptor: $0, size: style.fontSize) }
+                        ?? UIFont.systemFont(ofSize: style.fontSize, weight: span.kind == .bold ? .bold : .regular)
+                    attributed.addAttribute(.font, value: font, range: range)
+                }
+            }
             if let spaces = try? NSRegularExpression(pattern: " +") {
                 for match in spaces.matches(in: page.text, range: full) {
                     attributed.addAttribute(.kern, value: style.wordSpacing, range: match.range)
