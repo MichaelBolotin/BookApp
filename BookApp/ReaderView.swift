@@ -6,6 +6,7 @@ import Combine
 final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published private(set) var isSpeaking = false
     private let synthesizer = AVSpeechSynthesizer()
+    private var currentUtterance: AVSpeechUtterance?
 
     override init() {
         super.init()
@@ -13,24 +14,50 @@ final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDel
     }
 
     func speak(_ word: String) {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setActive(true)
+        } catch {
+            // Speech synthesis can still work with the current audio session.
+        }
         synthesizer.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: word)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.86
+        currentUtterance = utterance
         synthesizer.speak(utterance)
-        isSpeaking = true
     }
 
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
+        currentUtterance = nil
         isSpeaking = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        Task { @MainActor in
+            if self.currentUtterance === utterance { self.isSpeaking = true }
+        }
+    }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.isSpeaking = false }
+        Task { @MainActor in
+            if self.currentUtterance === utterance {
+                self.currentUtterance = nil
+                self.isSpeaking = false
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
     }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.isSpeaking = false }
+        Task { @MainActor in
+            if self.currentUtterance === utterance {
+                self.currentUtterance = nil
+                self.isSpeaking = false
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
     }
 }
 
@@ -161,9 +188,12 @@ struct ReaderView: View {
             Button("Show controls", systemImage: "arrow.up.left.and.arrow.down.right") {
                 immersive = false
             }
-            .buttonStyle(.bordered)
+            .labelStyle(.iconOnly)
+            .buttonStyle(.plain)
+            .foregroundStyle(style.theme == "dark" ? Color.white : Color.primary)
+            .padding(10)
+            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
             .padding(8)
-            .opacity(0.65)
         }
     }
 
@@ -226,6 +256,7 @@ struct ReaderView: View {
         Button("Read selected word aloud", systemImage: "speaker.wave.2.fill") {
             if let selectedSpokenWord { speech.speak(selectedSpokenWord) }
         }
+        .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
     }
 }
