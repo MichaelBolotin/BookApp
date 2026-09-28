@@ -1,13 +1,13 @@
 import Foundation
 
-/// A separate request contract; the whole-book GeminiTranslator remains available for older jobs.
+/// Sends one selected word with a small context window.
 struct OnDemandWordTranslator {
     let apiKey: String
     let model: AppConfiguration.GeminiModel
 
     func makeRequest(pages: [ReadingPage], pageIndex: Int, wordIndex: Int) throws -> (URLRequest, Data) {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw GeminiTranslator.TranslationError.missingKey
+            throw Error.missingKey
         }
         guard pages.indices.contains(pageIndex), pages[pageIndex].words.indices.contains(wordIndex) else {
             throw Error.invalidWord
@@ -69,12 +69,24 @@ struct OnDemandWordTranslator {
         return hebrew
     }
 
+    static func responseError(status: Int, data: Data, modelID: String) -> Error {
+        struct APIError: Decodable {
+            struct Detail: Decodable { let message: String }
+            let error: Detail
+        }
+        let message = (try? JSONDecoder().decode(APIError.self, from: data).error.message)
+            ?? HTTPURLResponse.localizedString(forStatusCode: status)
+        return .api("HTTP \(status): \(message) (model: \(modelID))")
+    }
+
     enum Error: LocalizedError {
-        case invalidWord, invalidResponse
+        case missingKey, invalidWord, invalidResponse, api(String)
         var errorDescription: String? {
             switch self {
+            case .missingKey: "Add a Gemini API key in Settings before translating a word."
             case .invalidWord: "This word is no longer available in the book."
             case .invalidResponse: "Gemini returned no usable translation. The paid response was saved; retry only if you want to send another request."
+            case .api(let message): "Gemini request failed: \(message)"
             }
         }
     }

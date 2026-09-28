@@ -8,15 +8,10 @@ struct BookDetailsView: View {
     var body: some View {
         NavigationStack {
             if let book = library.books.first(where: { $0.id == bookID }) {
-                let cost = book.translationCost ?? book.rawResponse.flatMap {
-                    BookTranslationCost.estimate(rawResponse: $0,
-                        requestedModel: book.translationModelID, at: book.addedAt)
-                }
-                let previousCosts = (book.previousResponses ?? []).compactMap {
-                    BookTranslationCost.estimate(rawResponse: $0, requestedModel: nil, at: book.addedAt)
-                }
                 let wordCosts = (book.savedWordTranslations ?? []).compactMap(\.cost)
-                let allCosts = ([cost].compactMap { $0 } + previousCosts + wordCosts)
+                let historicalCosts = book.historicalCosts ?? []
+                let allCosts = historicalCosts + wordCosts
+                let requestCount = (book.savedWordTranslations ?? []).count + (book.historicalRequestCount ?? 0)
                 Form {
                     Section("Book") {
                         LabeledContent("Title", value: book.title)
@@ -24,8 +19,10 @@ struct BookDetailsView: View {
                         LabeledContent("Translated words", value: "\(book.translatedWordCount) of \(book.wordCount)")
                     }
                     Section("Translation cost") {
+                        if requestCount > 0 {
+                            LabeledContent("Translation requests", value: "\(requestCount)")
+                        }
                         if !allCosts.isEmpty {
-                            LabeledContent("Translation requests", value: "\((book.savedWordTranslations ?? []).count + (cost == nil ? 0 : 1) + (book.previousResponses ?? []).count)")
                             LabeledContent("Input tokens", value: allCosts.reduce(0) { $0 + $1.inputTokens }.formatted())
                             LabeledContent("Output tokens", value: allCosts.reduce(0) { $0 + $1.outputTokens }.formatted())
                             LabeledContent("Thinking tokens", value: allCosts.reduce(0) { $0 + $1.thoughtTokens }.formatted())
@@ -34,7 +31,7 @@ struct BookDetailsView: View {
                             Text("Cumulative estimate using each model's Standard paid rate when its request was processed, including thinking tokens. Your actual bill may be zero on a free tier or differ with discounts and taxes.")
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
-                        let unpriced = (book.savedWordTranslations ?? []).count - wordCosts.count
+                        let unpriced = requestCount - allCosts.count
                         if unpriced > 0 {
                             Text("\(unpriced) request(s) did not provide usable usage or pricing data and are excluded from this estimate.")
                                 .font(.footnote).foregroundStyle(.secondary)

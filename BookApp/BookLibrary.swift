@@ -3,6 +3,15 @@ import Combine
 import CryptoKit
 import Security
 
+/// Reads old snapshot metadata once; it cannot start the former whole-book workflow.
+private struct LegacyBookUsage: Decodable {
+    let state: String?
+    let rawResponse: String?
+    let previousResponses: [String]?
+    let translationModelID: String?
+    let translationCost: BookTranslationCost?
+}
+
 @MainActor
 final class BookLibrary: ObservableObject {
     @Published private(set) var books: [ReadingBook] = []
@@ -21,8 +30,17 @@ final class BookLibrary: ObservableObject {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         books = files.filter { $0.pathExtension == "json" }.compactMap { url in
             guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? JSONDecoder().decode(ReadingBook.self, from: data)
+            return Self.decodeBook(data)
         }.sorted { $0.addedAt > $1.addedAt }
+        for book in books {
+            if let data = try? Data(contentsOf: bookURL(book.id, extension: "json")),
+               let legacy = try? JSONDecoder().decode(LegacyBookUsage.self, from: data),
+               legacy.state != nil {
+                if legacy.state == "processing" { BackgroundGeminiService.shared.cancel(book.id) }
+                // Re-encode without the old response and processing fields after extracting usage.
+                try? save(book)
+            }
+        }
         for file in files where file.pathExtension == "deleted" {
             guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent),
                   let data = try? Data(contentsOf: file),
@@ -30,6 +48,38 @@ final class BookLibrary: ObservableObject {
             tombstones[id] = date
         }
         BackgroundGeminiService.shared.onResult = { [weak self] id in self?.handleResult(id) }
+    }
+
+    private static func decodeBook(_ data: Data) -> ReadingBook? {
+        guard var book = try? JSONDecoder().decode(ReadingBook.self, from: data) else { return nil }
+        // A saved two-word phrase cannot be assigned accurately to either single word.
+        for pageIndex in book.pages.indices {
+            book.pages[pageIndex].translations.removeAll { $0.start != $0.end }
+        }
+        if let legacy = try? JSONDecoder().decode(LegacyBookUsage.self, from: data) {
+            var costs = book.historicalCosts ?? []
+            if let raw = legacy.rawResponse {
+                if let cost = legacy.translationCost ?? BookTranslationCost.estimate(
+                    rawResponse: raw, requestedModel: legacy.translationModelID, at: book.addedAt) {
+                    costs.append(cost)
+                }
+            } else if let cost = legacy.translationCost {
+                costs.append(cost)
+            }
+            for raw in legacy.previousResponses ?? [] {
+                if let cost = BookTranslationCost.estimate(rawResponse: raw,
+                    requestedModel: nil, at: book.addedAt) {
+                    costs.append(cost)
+                }
+            }
+            let count = (legacy.rawResponse == nil && legacy.translationCost == nil ? 0 : 1)
+                + (legacy.previousResponses ?? []).count
+            if count > 0 {
+                book.historicalCosts = costs
+                book.historicalRequestCount = (book.historicalRequestCount ?? 0) + count
+            }
+        }
+        return book
     }
 
     func importPDF(at url: URL) throws {
@@ -43,7 +93,7 @@ final class BookLibrary: ObservableObject {
         try data.write(to: destination, options: .atomic)
         let book = ReadingBook(id: id, title: url.deletingPathExtension().lastPathComponent,
                                addedAt: Date(), fingerprint: digest, pages: pages,
-                               state: .ready, errorMessage: nil, modifiedAt: Date())
+                               modifiedAt: Date())
         do { try save(book) } catch {
             try? FileManager.default.removeItem(at: destination)
             throw error
@@ -108,8 +158,8 @@ final class BookLibrary: ObservableObject {
         guard let status = outcome.status, (200..<300).contains(status),
               let raw = String(data: outcome.body, encoding: .utf8) else {
             let message = outcome.status.map {
-                GeminiTranslator.responseError(status: $0, data: outcome.body,
-                    modelID: pending.modelID, wordCount: 1).localizedDescription
+                OnDemandWordTranslator.responseError(status: $0, data: outcome.body,
+                    modelID: pending.modelID).localizedDescription
             } ?? outcome.error ?? "The translation transfer ended without a response. Retry only if you want to send a new request."
             recordWordFailure(message, for: pending, in: id)
             BackgroundGeminiService.shared.removeResult(pending.id)
@@ -168,65 +218,11 @@ final class BookLibrary: ObservableObject {
                 }
             }
         }
-        for candidate in books where candidate.state == .processing {
-            var book = candidate
-            if BackgroundGeminiService.shared.result(book.id) != nil {
-                handleResult(book.id)
-            } else if book.rawResponse != nil {
-                processSaved(book.id)
-            } else if active.contains(book.id) {
-                continue
-            } else if Date().timeIntervalSince(book.modifiedAt ?? book.addedAt) > 120 {
-                book.state = .failed
-                book.errorMessage = "The background transfer ended without a saved result. Its remote outcome is unknown. Send a new request explicitly if you want to try again."
-                try? replace(book)
-            } else {
-                awaitingTaskRegistration = true
-            }
-        }
         if awaitingTaskRegistration {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(125))
                 await self?.resumePending()
             }
-        }
-    }
-
-    func retry(_ id: UUID) {
-        if BackgroundGeminiService.shared.result(id) != nil {
-            handleResult(id) // Recover a delivered response before considering a paid retry.
-            return
-        }
-        guard var book = books.first(where: { $0.id == id }),
-              book.state == .failed else { return }
-        if let raw = book.rawResponse {
-            book.previousResponses = (book.previousResponses ?? []) + [raw]
-        }
-        book.rawResponse = nil
-        book.translationCost = nil
-        book.errorMessage = nil
-        book.state = .processing
-        do {
-            try replace(book)
-            start(id)
-        } catch {
-            book.state = .failed
-            book.errorMessage = error.localizedDescription
-            try? replace(book)
-        }
-    }
-
-    func recheckSavedResponse(_ id: UUID) {
-        guard var book = books.first(where: { $0.id == id }),
-              book.state == .failed, book.rawResponse != nil else { return }
-        book.state = .processing
-        do {
-            try replace(book)
-            processSaved(id) // No HTTP request.
-        } catch {
-            book.state = .failed
-            book.errorMessage = error.localizedDescription
-            try? replace(book)
         }
     }
 
@@ -242,7 +238,6 @@ final class BookLibrary: ObservableObject {
                 BackgroundGeminiService.shared.cancel(pending.id)
             }
         }
-        BackgroundGeminiService.shared.cancel(id)
         let date = Date()
         let tombstoneURL = directory.appendingPathComponent(id.uuidString).appendingPathExtension("deleted")
         do {
@@ -255,88 +250,14 @@ final class BookLibrary: ObservableObject {
         scheduleCloudSync()
     }
 
-    private func start(_ id: UUID) {
-        guard var book = books.first(where: { $0.id == id }) else { return }
-        do {
-            if book.rawResponse != nil {
-                processSaved(id)
-                return
-            }
-            let translator = GeminiTranslator(apiKey: SettingsStore.apiKey,
-                                              model: SettingsStore.model,
-                                              instructions: SettingsStore.instructions)
-            let (request, body) = try translator.makeRequest(for: book.pages)
-            book.translationModelID = translator.model.rawValue
-            try replace(book)
-            try BackgroundGeminiService.shared.enqueue(bookID: id, request: request, body: body)
-        } catch {
-            book.state = .failed
-            book.errorMessage = error.localizedDescription
-            try? replace(book)
-        }
-    }
-
     private func handleResult(_ id: UUID) {
         if let book = books.first(where: { ($0.pendingWordTranslations ?? []).contains { $0.id == id } }),
            let pending = book.pendingWordTranslations?.first(where: { $0.id == id }) {
             handleWordResult(pending, in: book.id)
             return
         }
-        guard let outcome = BackgroundGeminiService.shared.result(id) else { return }
-        guard var book = books.first(where: { $0.id == id }) else {
-            BackgroundGeminiService.shared.removeResult(id)
-            return
-        }
-        do {
-            if let status = outcome.status, (200..<300).contains(status),
-               let raw = String(data: outcome.body, encoding: .utf8) {
-                book.rawResponse = raw
-                book.translationCost = BookTranslationCost.estimate(
-                    rawResponse: raw, requestedModel: book.translationModelID)
-                try replace(book) // Durable paid response before parsing or removing transfer result.
-                BackgroundGeminiService.shared.removeResult(id)
-                processSaved(id)
-            } else {
-                book.state = .failed
-                if let status = outcome.status {
-                    book.errorMessage = GeminiTranslator.responseError(
-                        status: status, data: outcome.body,
-                        modelID: book.translationModelID ?? "unknown",
-                        wordCount: book.wordCount).localizedDescription
-                } else {
-                    book.errorMessage = outcome.error ?? "Background transfer ended without an HTTP response."
-                }
-                try replace(book)
-                BackgroundGeminiService.shared.removeResult(id)
-            }
-        } catch {
-            book.state = .failed
-            book.errorMessage = "Could not save the Gemini result: \(error.localizedDescription)"
-            try? replace(book)
-        }
-    }
-
-    private func processSaved(_ id: UUID) {
-        guard var book = books.first(where: { $0.id == id }), let raw = book.rawResponse else { return }
-        do {
-            if book.translationCost == nil {
-                book.translationCost = BookTranslationCost.estimate(
-                    rawResponse: raw, requestedModel: book.translationModelID)
-            }
-            let translated = try GeminiTranslator.parse(raw, pages: book.pages)
-            for index in book.pages.indices {
-                book.pages[index].translations = translated.pages[index]
-                book.pages[index].completedChunkStarts = []
-            }
-            book.state = .ready
-            book.errorMessage = translated.translatedWords == translated.totalWords ? nil
-                : "\(translated.translatedWords) of \(translated.totalWords) words have a saved translation. Untranslated words remain tappable but show a missing-translation message."
-            try replace(book)
-        } catch {
-            book.state = .failed
-            book.errorMessage = error.localizedDescription
-            try? replace(book)
-        }
+        // An old transfer may finish after migration; it must never restart translation.
+        BackgroundGeminiService.shared.removeResult(id)
     }
 
     private func replace(_ value: ReadingBook) throws {
@@ -382,7 +303,7 @@ final class BookLibrary: ObservableObject {
                     continue
                 }
                 let local = books.first { $0.id == item.id }
-                if local?.state == .processing || !(local?.pendingWordTranslations ?? []).isEmpty { continue }
+                if !(local?.pendingWordTranslations ?? []).isEmpty { continue }
                 if item.deleted {
                     if local == nil || item.modifiedAt >= (local?.modifiedAt ?? local?.addedAt ?? .distantPast) {
                         books.removeAll { $0.id == item.id }
@@ -399,8 +320,8 @@ final class BookLibrary: ObservableObject {
                 }
                 if local == nil || item.modifiedAt > (local?.modifiedAt ?? local?.addedAt ?? .distantPast) {
                     guard let snapshot = item.snapshot, let pdf = item.pdf,
-                          let imported = try? JSONDecoder().decode(ReadingBook.self, from: snapshot) else { continue }
-                    try snapshot.write(to: bookURL(item.id, extension: "json"), options: .atomic)
+                          let imported = Self.decodeBook(snapshot) else { continue }
+                    try JSONEncoder().encode(imported).write(to: bookURL(item.id, extension: "json"), options: .atomic)
                     try pdf.write(to: bookURL(item.id, extension: "pdf"), options: .atomic)
                     books.removeAll { $0.id == item.id }
                     books.append(imported)
@@ -410,7 +331,7 @@ final class BookLibrary: ObservableObject {
                                            pdfURL: bookURL(item.id, extension: "pdf"))
                 }
             }
-            for book in books where !remoteIDs.contains(book.id) && book.state != .processing
+            for book in books where !remoteIDs.contains(book.id)
                 && (book.pendingWordTranslations ?? []).isEmpty {
                 try await cloud.upload(book, snapshotURL: bookURL(book.id, extension: "json"),
                                        pdfURL: bookURL(book.id, extension: "pdf"))
@@ -468,14 +389,5 @@ enum SettingsStore {
     static var model: AppConfiguration.GeminiModel {
         AppConfiguration.GeminiModel(rawValue: UserDefaults.standard.string(forKey: "geminiModel") ?? "")
             ?? AppConfiguration.defaultModel
-    }
-    static var instructions: String {
-        let saved = UserDefaults.standard.string(forKey: "geminiInstructions") ?? ""
-        // The previous default instructed Gemini to omit one item for a two-word phrase.
-        if saved.contains("zero-based LOCAL indexes.")
-            || saved.contains("translations must contain one entry for EVERY indexed word") {
-            return AppConfiguration.defaultInstructions
-        }
-        return saved.isEmpty ? AppConfiguration.defaultInstructions : saved
     }
 }

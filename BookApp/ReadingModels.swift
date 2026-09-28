@@ -1,9 +1,5 @@
 import Foundation
 
-enum ProcessingState: String, Codable {
-    case processing, ready, failed
-}
-
 struct WordToken: Codable, Identifiable {
     let id: Int
     let text: String
@@ -25,7 +21,6 @@ struct ReadingPage: Codable, Identifiable {
     let text: String
     let words: [WordToken]
     var translations: [TranslationSpan] = []
-    var completedChunkStarts: [Int] = []
 }
 
 struct PendingWordTranslation: Codable {
@@ -57,16 +52,11 @@ struct ReadingBook: Codable, Identifiable {
     let addedAt: Date
     let fingerprint: String
     var pages: [ReadingPage]
-    var state: ProcessingState
-    var errorMessage: String?
-    /// Complete successful HTTP response, saved before decoding so relaunch never resends it.
-    var rawResponse: String? = nil
-    /// Earlier paid responses remain available even after an explicit new request.
-    var previousResponses: [String]? = nil
-    var translationModelID: String? = nil
-    var translationCost: BookTranslationCost? = nil
     var modifiedAt: Date? = nil
     var currentPage: Int = 0
+    /// Cost history migrated from books made before translation on tap.
+    var historicalCosts: [BookTranslationCost]? = nil
+    var historicalRequestCount: Int? = nil
     /// Optional for books written by earlier versions of the app.
     var pendingWordTranslations: [PendingWordTranslation]? = nil
     var savedWordTranslations: [SavedWordTranslation]? = nil
