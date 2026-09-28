@@ -129,7 +129,6 @@ struct ContentView: View {
 
 private struct ProcessingFailureView: View {
     @ObservedObject var library: BookLibrary
-    @AppStorage("geminiModel") private var model = AppConfiguration.defaultModel.rawValue
     let bookID: UUID
 
     var body: some View {
@@ -165,14 +164,7 @@ private struct ProcessingFailureView: View {
                                 Text("Gemini is temporarily overloaded. Wait and try later, or choose another model below. No translation was returned or saved.")
                                     .foregroundStyle(.secondary)
                             }
-                            Picker("Model for the next request", selection: $model) {
-                                ForEach(AppConfiguration.GeminiModel.allCases) { option in
-                                    Text(option.title).tag(option.rawValue)
-                                }
-                            }
-                            Button("Send one new Gemini request") { library.retry(bookID) }
-                                .buttonStyle(.borderedProminent)
-                            Text("This sends the entire book to the selected model in one request and may incur an API charge. Nothing is sent when you open this screen or change the model.")
+                            Text("This book has an earlier whole-book processing error. Its saved response can be checked without another API request.")
                                 .font(.footnote).foregroundStyle(.secondary)
                         } else if book.state == .processing {
                             ProgressView("Preparing the book")
@@ -214,17 +206,17 @@ struct SettingsView: View {
                             Text(option.title).tag(option.rawValue)
                         }
                     }
-                    Text("The key is stored in this device's Keychain. The entire book is sent in one request. A failed request is retried only when you choose to send it again.")
+                    Text("The key is stored in this device's Keychain. Each new word you tap sends only that word and up to ten neighboring words on either side. Saved translations are reused without another request.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
-                Section("Translation instructions") {
+                Section("Legacy whole-book instructions") {
                     TextEditor(text: $instructions)
                         .frame(minHeight: 260)
                         .accessibilityLabel("Gemini translation instructions")
                     Button("Restore default instructions") { instructions = AppConfiguration.defaultInstructions }
                 }
                 Section {
-                    Text("PDF text is sent to Google's Gemini API during preparation. Translations and reading progress are stored on this device.")
+                    Text("Importing a PDF does not send it to Gemini. A tapped word and its nearby context are sent when you request its translation. Saved translations and reading progress are stored on this device.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("iCloud") {

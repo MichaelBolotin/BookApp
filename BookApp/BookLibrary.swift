@@ -33,7 +33,6 @@ final class BookLibrary: ObservableObject {
     }
 
     func importPDF(at url: URL) throws {
-        guard !SettingsStore.apiKey.isEmpty else { throw GeminiTranslator.TranslationError.missingKey }
         // File importer URLs are security scoped; consume and copy before the caller releases access.
         let data = try Data(contentsOf: url)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -44,19 +43,131 @@ final class BookLibrary: ObservableObject {
         try data.write(to: destination, options: .atomic)
         let book = ReadingBook(id: id, title: url.deletingPathExtension().lastPathComponent,
                                addedAt: Date(), fingerprint: digest, pages: pages,
-                               state: .processing, errorMessage: nil, modifiedAt: Date())
+                               state: .ready, errorMessage: nil, modifiedAt: Date())
         do { try save(book) } catch {
             try? FileManager.default.removeItem(at: destination)
             throw error
         }
         books.insert(book, at: 0)
         scheduleCloudSync()
-        start(id)
+    }
+
+    func requestWord(_ wordIndex: Int, on pageIndex: Int, in id: UUID, retry: Bool = false) {
+        guard var book = books.first(where: { $0.id == id }),
+              book.pages.indices.contains(pageIndex),
+              book.pages[pageIndex].words.indices.contains(wordIndex),
+              !book.pages[pageIndex].translations.contains(where: { $0.contains(wordIndex) }),
+              !(book.pendingWordTranslations ?? []).contains(where: {
+                  $0.pageIndex == pageIndex && $0.wordIndex == wordIndex
+              }) else { return }
+        // A saved response that failed validation is never silently billed again.
+        if !retry && ((book.savedWordTranslations ?? []).contains(where: {
+            $0.pageIndex == pageIndex && $0.wordIndex == wordIndex
+        }) || (book.wordTranslationFailures ?? []).contains(where: {
+            $0.pageIndex == pageIndex && $0.wordIndex == wordIndex
+        })) { return }
+        do {
+            let translator = OnDemandWordTranslator(apiKey: SettingsStore.apiKey, model: SettingsStore.model)
+            let (request, body) = try translator.makeRequest(
+                pages: book.pages, pageIndex: pageIndex, wordIndex: wordIndex)
+            let pending = PendingWordTranslation(id: UUID(), pageIndex: pageIndex,
+                                                 wordIndex: wordIndex, modelID: translator.model.rawValue,
+                                                 startedAt: Date())
+            book.wordTranslationFailures?.removeAll { $0.pageIndex == pageIndex && $0.wordIndex == wordIndex }
+            book.pendingWordTranslations = (book.pendingWordTranslations ?? []) + [pending]
+            try replace(book)
+            do {
+                try BackgroundGeminiService.shared.enqueue(bookID: pending.id, request: request, body: body)
+            } catch {
+                recordWordFailure(error.localizedDescription, for: pending, in: id)
+            }
+        } catch {
+            let pending = PendingWordTranslation(id: UUID(), pageIndex: pageIndex,
+                                                 wordIndex: wordIndex, modelID: SettingsStore.model.rawValue,
+                                                 startedAt: Date())
+            recordWordFailure(error.localizedDescription, for: pending, in: id)
+        }
+    }
+
+    private func recordWordFailure(_ message: String, for pending: PendingWordTranslation, in id: UUID) {
+        guard var book = books.first(where: { $0.id == id }) else { return }
+        book.pendingWordTranslations?.removeAll { $0.id == pending.id }
+        book.wordTranslationFailures?.removeAll {
+            $0.pageIndex == pending.pageIndex && $0.wordIndex == pending.wordIndex
+        }
+        book.wordTranslationFailures = (book.wordTranslationFailures ?? []) + [
+            WordTranslationFailure(pageIndex: pending.pageIndex,
+                                   wordIndex: pending.wordIndex, message: message)
+        ]
+        try? replace(book)
+    }
+
+    private func handleWordResult(_ pending: PendingWordTranslation, in id: UUID) {
+        guard let outcome = BackgroundGeminiService.shared.result(pending.id),
+              var book = books.first(where: { $0.id == id }) else { return }
+        guard let status = outcome.status, (200..<300).contains(status),
+              let raw = String(data: outcome.body, encoding: .utf8) else {
+            let message = outcome.status.map {
+                GeminiTranslator.responseError(status: $0, data: outcome.body,
+                    modelID: pending.modelID, wordCount: 1).localizedDescription
+            } ?? outcome.error ?? "The translation transfer ended without a response. Retry only if you want to send a new request."
+            recordWordFailure(message, for: pending, in: id)
+            BackgroundGeminiService.shared.removeResult(pending.id)
+            return
+        }
+        if !(book.savedWordTranslations ?? []).contains(where: { $0.requestID == pending.id }) {
+            let saved = SavedWordTranslation(requestID: pending.id, pageIndex: pending.pageIndex,
+                wordIndex: pending.wordIndex, modelID: pending.modelID, rawResponse: raw,
+                cost: BookTranslationCost.estimate(rawResponse: raw, requestedModel: pending.modelID))
+            book.savedWordTranslations = (book.savedWordTranslations ?? []) + [saved]
+        }
+        do {
+            try replace(book) // Preserve the paid response and usage before decoding it.
+            BackgroundGeminiService.shared.removeResult(pending.id)
+            do {
+                let hebrew = try OnDemandWordTranslator.parse(raw)
+                book.pages[pending.pageIndex].translations.append(
+                    TranslationSpan(start: pending.wordIndex, end: pending.wordIndex, hebrew: hebrew))
+                book.pendingWordTranslations?.removeAll { $0.id == pending.id }
+                try replace(book)
+            } catch {
+                recordWordFailure(error.localizedDescription, for: pending, in: id)
+            }
+        } catch {
+            // Keep the transfer result for reconciliation if the durable write failed.
+        }
     }
 
     func resumePending() async {
         let active = await BackgroundGeminiService.shared.activeBookIDs()
         var awaitingTaskRegistration = false
+        for candidate in books {
+            for pending in candidate.pendingWordTranslations ?? [] {
+                if BackgroundGeminiService.shared.result(pending.id) != nil {
+                    handleWordResult(pending, in: candidate.id)
+                } else if let saved = candidate.savedWordTranslations?.first(where: { $0.requestID == pending.id }) {
+                    do {
+                        let hebrew = try OnDemandWordTranslator.parse(saved.rawResponse)
+                        if var current = books.first(where: { $0.id == candidate.id }) {
+                            if !current.pages[pending.pageIndex].translations.contains(where: { $0.contains(pending.wordIndex) }) {
+                                current.pages[pending.pageIndex].translations.append(
+                                    TranslationSpan(start: pending.wordIndex, end: pending.wordIndex, hebrew: hebrew))
+                            }
+                            current.pendingWordTranslations?.removeAll { $0.id == pending.id }
+                            try replace(current)
+                        }
+                    } catch {
+                        recordWordFailure(error.localizedDescription, for: pending, in: candidate.id)
+                    }
+                } else if active.contains(pending.id) {
+                    continue
+                } else if Date().timeIntervalSince(pending.startedAt) > 120 {
+                    recordWordFailure("The background transfer ended without a saved result. Its outcome is unknown; retry only if you want to send a new request.", for: pending, in: candidate.id)
+                } else {
+                    awaitingTaskRegistration = true
+                }
+            }
+        }
         for candidate in books where candidate.state == .processing {
             var book = candidate
             if BackgroundGeminiService.shared.result(book.id) != nil {
@@ -126,6 +237,11 @@ final class BookLibrary: ObservableObject {
     }
 
     func delete(_ id: UUID) {
+        if let book = books.first(where: { $0.id == id }) {
+            for pending in book.pendingWordTranslations ?? [] {
+                BackgroundGeminiService.shared.cancel(pending.id)
+            }
+        }
         BackgroundGeminiService.shared.cancel(id)
         let date = Date()
         let tombstoneURL = directory.appendingPathComponent(id.uuidString).appendingPathExtension("deleted")
@@ -161,6 +277,11 @@ final class BookLibrary: ObservableObject {
     }
 
     private func handleResult(_ id: UUID) {
+        if let book = books.first(where: { ($0.pendingWordTranslations ?? []).contains { $0.id == id } }),
+           let pending = book.pendingWordTranslations?.first(where: { $0.id == id }) {
+            handleWordResult(pending, in: book.id)
+            return
+        }
         guard let outcome = BackgroundGeminiService.shared.result(id) else { return }
         guard var book = books.first(where: { $0.id == id }) else {
             BackgroundGeminiService.shared.removeResult(id)
@@ -261,7 +382,7 @@ final class BookLibrary: ObservableObject {
                     continue
                 }
                 let local = books.first { $0.id == item.id }
-                if local?.state == .processing { continue }
+                if local?.state == .processing || !(local?.pendingWordTranslations ?? []).isEmpty { continue }
                 if item.deleted {
                     if local == nil || item.modifiedAt >= (local?.modifiedAt ?? local?.addedAt ?? .distantPast) {
                         books.removeAll { $0.id == item.id }
@@ -289,7 +410,8 @@ final class BookLibrary: ObservableObject {
                                            pdfURL: bookURL(item.id, extension: "pdf"))
                 }
             }
-            for book in books where !remoteIDs.contains(book.id) && book.state != .processing {
+            for book in books where !remoteIDs.contains(book.id) && book.state != .processing
+                && (book.pendingWordTranslations ?? []).isEmpty {
                 try await cloud.upload(book, snapshotURL: bookURL(book.id, extension: "json"),
                                        pdfURL: bookURL(book.id, extension: "pdf"))
             }

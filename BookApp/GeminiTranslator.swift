@@ -11,7 +11,7 @@ struct GeminiTranslator {
         case missingKey, tooLong(Int), invalidResponse(String), invalidCoverage(String), legacyUnaligned(Int, Int), api(String)
         var errorDescription: String? {
             switch self {
-            case .missingKey: "Add a Gemini API key in Settings before importing a book."
+            case .missingKey: "Add a Gemini API key in Settings before translating a word."
             case .tooLong(let count): "This book has \(count) English words. A single Gemini response can hold at most \(GeminiTranslator.maximumWords) words in this app. No request was sent."
             case .invalidResponse(let detail): "Gemini returned an unusable response: \(detail) The response was saved on this device. A new request requires an explicit retry."
             case .invalidCoverage(let detail): "Gemini did not translate every word correctly: \(detail) The response was saved on this device. A new request requires an explicit retry."

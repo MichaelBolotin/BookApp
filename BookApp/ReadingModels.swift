@@ -28,6 +28,29 @@ struct ReadingPage: Codable, Identifiable {
     var completedChunkStarts: [Int] = []
 }
 
+struct PendingWordTranslation: Codable {
+    let id: UUID
+    let pageIndex: Int
+    let wordIndex: Int
+    let modelID: String
+    let startedAt: Date
+}
+
+struct SavedWordTranslation: Codable {
+    let requestID: UUID?
+    let pageIndex: Int
+    let wordIndex: Int
+    let modelID: String
+    let rawResponse: String
+    let cost: BookTranslationCost?
+}
+
+struct WordTranslationFailure: Codable {
+    let pageIndex: Int
+    let wordIndex: Int
+    let message: String
+}
+
 struct ReadingBook: Codable, Identifiable {
     let id: UUID
     var title: String
@@ -44,6 +67,10 @@ struct ReadingBook: Codable, Identifiable {
     var translationCost: BookTranslationCost? = nil
     var modifiedAt: Date? = nil
     var currentPage: Int = 0
+    /// Optional for books written by earlier versions of the app.
+    var pendingWordTranslations: [PendingWordTranslation]? = nil
+    var savedWordTranslations: [SavedWordTranslation]? = nil
+    var wordTranslationFailures: [WordTranslationFailure]? = nil
 
     var wordCount: Int { pages.reduce(0) { $0 + $1.words.count } }
     var translatedWordCount: Int {

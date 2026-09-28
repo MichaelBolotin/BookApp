@@ -65,9 +65,9 @@ struct ReaderView: View {
     @ObservedObject var library: BookLibrary
     let bookID: UUID
     @StateObject private var speech = SpeechController()
-    @State private var selected: TranslationSpan?
-    @State private var selectedMissingWord: String?
+    @State private var selectedWordIndex: Int?
     @State private var selectedSpokenWord: String?
+    @State private var loadingOpacity = 1.0
     @State private var immersive = false
     @State private var details = false
     @State private var preferences = false
@@ -114,10 +114,15 @@ struct ReaderView: View {
     }
 
     private func readingText(_ page: ReadingPage) -> some View {
-        InteractiveTextView(page: page, selection: selected, style: style) { index in
-            selected = page.translations.first { $0.contains(index) }
-            selectedMissingWord = selected == nil ? page.words[index].text : nil
+        let selection = selectedWordIndex.flatMap { index in
+            guard page.words.indices.contains(index) else { return nil }
+            return page.translations.first { $0.contains(index) } ??
+                TranslationSpan(start: index, end: index, hebrew: "")
+        }
+        return InteractiveTextView(page: page, selection: selection, style: style) { index in
+            selectedWordIndex = index
             selectedSpokenWord = page.words[index].text
+            library.requestWord(index, on: page.id, in: bookID)
         }
         .background(Color(uiColor: style.background))
     }
@@ -133,7 +138,8 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func selectionCard(page: ReadingPage) -> some View {
-        if let selected {
+        if let index = selectedWordIndex, page.words.indices.contains(index),
+           let selected = page.translations.first(where: { $0.contains(index) }) {
             HStack(alignment: .firstTextBaseline) {
                 Text(page.words[selected.start...selected.end].map(\.text).joined(separator: " "))
                     .font(.headline)
@@ -145,10 +151,33 @@ struct ReaderView: View {
             }
             .padding(14)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        } else if let selectedMissingWord {
-            HStack {
-                Text("No saved translation for “\(selectedMissingWord)”.")
-                Spacer()
+        } else if let index = selectedWordIndex, page.words.indices.contains(index) {
+            HStack(spacing: 12) {
+                Text(page.words[index].text).font(.headline)
+                Spacer(minLength: 12)
+                if let failure = book?.wordTranslationFailures?.last(where: {
+                    $0.pageIndex == page.id && $0.wordIndex == index
+                }) {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text(failure.message).font(.caption).foregroundStyle(.secondary)
+                        Button("Retry translation") {
+                            library.requestWord(index, on: page.id, in: bookID, retry: true)
+                        }.font(.caption)
+                    }
+                } else if book?.pendingWordTranslations?.contains(where: {
+                    $0.pageIndex == page.id && $0.wordIndex == index
+                }) == true {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.gray.opacity(0.35))
+                        .frame(width: 100, height: 18)
+                        .opacity(loadingOpacity)
+                        .accessibilityLabel("Translating word")
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                                loadingOpacity = 0.35
+                            }
+                        }
+                }
                 speechButton
             }
             .padding(14)
@@ -246,8 +275,7 @@ struct ReaderView: View {
 
     private func changePage(to index: Int) {
         speech.stop()
-        selected = nil
-        selectedMissingWord = nil
+        selectedWordIndex = nil
         selectedSpokenWord = nil
         library.setPage(index, in: bookID)
     }
