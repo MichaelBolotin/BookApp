@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFAudio
+import Combine
 
 @MainActor
 final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
