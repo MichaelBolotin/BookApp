@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-struct ReaderStyle {
+struct ReaderStyle: Equatable {
     var fontName: String
     var fontSize: CGFloat
     var wordSpacing: CGFloat
@@ -54,35 +54,58 @@ struct InteractiveTextView: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.parent = self
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = style.lineSpacing
-        let attributed = NSMutableAttributedString(string: page.text, attributes: [
-            .font: style.font, .foregroundColor: style.foreground, .paragraphStyle: paragraph
-        ])
-        let full = NSRange(location: 0, length: (page.text as NSString).length)
-        if let spaces = try? NSRegularExpression(pattern: " +") {
-            for match in spaces.matches(in: page.text, range: full) {
-                attributed.addAttribute(.kern, value: style.wordSpacing, range: match.range)
+        let needsNewText = context.coordinator.pageID != page.id
+            || context.coordinator.renderedText != page.text
+            || context.coordinator.renderedStyle != style
+        if needsNewText {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineSpacing = style.lineSpacing
+            let attributed = NSMutableAttributedString(string: page.text, attributes: [
+                .font: style.font, .foregroundColor: style.foreground, .paragraphStyle: paragraph
+            ])
+            let full = NSRange(location: 0, length: (page.text as NSString).length)
+            if let spaces = try? NSRegularExpression(pattern: " +") {
+                for match in spaces.matches(in: page.text, range: full) {
+                    attributed.addAttribute(.kern, value: style.wordSpacing, range: match.range)
+                }
             }
-        }
-        if let selection {
-            for word in page.words where selection.contains(word.id) {
-                attributed.addAttributes([
-                    .backgroundColor: style.theme == "dark" ? UIColor.systemIndigo.withAlphaComponent(0.7)
-                        : UIColor.systemIndigo.withAlphaComponent(0.25),
-                    .foregroundColor: style.theme == "dark" ? UIColor.white : UIColor.black
-                ], range: NSRange(location: word.location, length: word.length))
-            }
-        }
-        let pageChanged = context.coordinator.pageID != page.id
-        let currentOffset = view.contentOffset
-        view.attributedText = attributed
-        view.backgroundColor = style.background
-        if pageChanged {
-            view.setContentOffset(.zero, animated: false)
+            let pageChanged = context.coordinator.pageID != page.id
+            let currentOffset = view.contentOffset
+            view.attributedText = attributed
+            view.backgroundColor = style.background
             context.coordinator.pageID = page.id
-        } else {
-            view.setContentOffset(currentOffset, animated: false)
+            context.coordinator.renderedText = page.text
+            context.coordinator.renderedStyle = style
+            context.coordinator.renderedSelection = nil
+            if pageChanged {
+                view.setContentOffset(.zero, animated: false)
+            } else {
+                view.setContentOffset(currentOffset, animated: false)
+            }
+        }
+        // Editing only the selected ranges keeps UITextView's scroll position intact.
+        if context.coordinator.renderedSelection?.start != selection?.start
+            || context.coordinator.renderedSelection?.end != selection?.end {
+            let storage = view.textStorage
+            storage.beginEditing()
+            if let previous = context.coordinator.renderedSelection {
+                for word in page.words where previous.contains(word.id) {
+                    let range = NSRange(location: word.location, length: word.length)
+                    storage.removeAttribute(.backgroundColor, range: range)
+                    storage.addAttribute(.foregroundColor, value: style.foreground, range: range)
+                }
+            }
+            if let selection {
+                for word in page.words where selection.contains(word.id) {
+                    storage.addAttributes([
+                        .backgroundColor: style.theme == "dark" ? UIColor.systemIndigo.withAlphaComponent(0.7)
+                            : UIColor.systemIndigo.withAlphaComponent(0.25),
+                        .foregroundColor: style.theme == "dark" ? UIColor.white : UIColor.black
+                    ], range: NSRange(location: word.location, length: word.length))
+                }
+            }
+            storage.endEditing()
+            context.coordinator.renderedSelection = selection
         }
     }
 
@@ -90,6 +113,9 @@ struct InteractiveTextView: UIViewRepresentable {
         var parent: InteractiveTextView
         weak var view: UITextView?
         var pageID: Int?
+        var renderedText: String?
+        var renderedStyle: ReaderStyle?
+        var renderedSelection: TranslationSpan?
         init(_ parent: InteractiveTextView) { self.parent = parent }
 
         @objc func tapped(_ recognizer: UITapGestureRecognizer) {
