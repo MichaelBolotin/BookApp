@@ -44,7 +44,7 @@ struct GeminiTranslator {
         ]
         let body: [String: Any] = [
             "contents": [["role": "user", "parts": [["text": prompt]]]],
-            "generationConfig": ["responseFormat": ["text": ["mimeType": "application/json", "schema": schema]],
+            "generationConfig": ["responseFormat": ["text": ["mimeType": "APPLICATION_JSON", "schema": schema]],
                                  "temperature": 0.2, "maxOutputTokens": 8192]
         ]
         var request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model.rawValue):generateContent")!)

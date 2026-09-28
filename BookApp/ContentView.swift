@@ -1,11 +1,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 struct ContentView: View {
     @StateObject private var library = BookLibrary()
     @State private var importing = false
     @State private var settings = false
     @State private var errorMessage: String?
+    @State private var errorBook: ReadingBook?
 
     var body: some View {
         NavigationStack {
@@ -57,6 +59,29 @@ struct ContentView: View {
             .sheet(isPresented: $settings) {
                 SettingsView().onDisappear { library.resumePending() }
             }
+            .sheet(item: $errorBook) { book in
+                NavigationStack {
+                    ScrollView {
+                        Text(book.errorMessage ?? "Processing stopped without an error message.")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding()
+                    }
+                    .navigationTitle("Processing error")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Copy error") {
+                                UIPasteboard.general.string = book.errorMessage
+                            }
+                        }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { errorBook = nil }
+                        }
+                    }
+                }
+                .presentationDetents([.medium, .large])
+            }
             .alert("Could not import PDF", isPresented: Binding(
                 get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
             )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
@@ -79,8 +104,8 @@ struct ContentView: View {
                     Text("Preparing \(book.completedChunks) of \(book.totalChunks) batches")
                         .font(.caption).foregroundStyle(.secondary)
                 case .failed:
-                    Text(book.errorMessage ?? "Processing stopped")
-                        .font(.caption).foregroundStyle(.red).lineLimit(2)
+                    Button("View full error") { errorBook = book }
+                        .font(.caption).foregroundStyle(.red)
                     Button("Resume processing") { library.resume(book.id) }.font(.caption)
                 case .ready:
                     Text("Ready to read").font(.caption).foregroundStyle(.green)
