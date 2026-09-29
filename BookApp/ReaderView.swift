@@ -67,6 +67,11 @@ struct ReaderView: View {
     @StateObject private var speech = SpeechController()
     @State private var selectedWordIndex: Int?
     @State private var selectedSpokenWord: String?
+    @State private var sentenceSelection: TranslationSpan?
+    @State private var sentenceTranslation: String?
+    @State private var sentenceError: String?
+    @State private var translatingSentence = false
+    @State private var sentenceTask: Task<Void, Never>?
     @State private var loadingOpacity = 1.0
     @State private var immersive = false
     @State private var details = false
@@ -110,22 +115,37 @@ struct ReaderView: View {
             .sheet(isPresented: $details) { BookDetailsView(library: library, bookID: bookID) }
             .sheet(isPresented: $pageChooser) { pageSelection(book: book) }
             .sheet(isPresented: $preferences) { appearanceSettings }
-            .onDisappear { speech.stop() }
+            .onDisappear { speech.stop(); sentenceTask?.cancel() }
     }
 
     private func readingText(_ page: ReadingPage) -> some View {
         let selection: TranslationSpan?
-        if let index = selectedWordIndex, page.words.indices.contains(index) {
+        if let sentenceSelection {
+            selection = sentenceSelection
+        } else if let index = selectedWordIndex, page.words.indices.contains(index) {
             selection = page.translations.first { $0.contains(index) } ??
                 TranslationSpan(start: index, end: index, hebrew: "")
         } else {
             selection = nil
         }
-        return InteractiveTextView(page: page, selection: selection, style: style) { index in
+        return InteractiveTextView(page: page, selection: selection, style: style,
+                                   onTapWord: { index in
+            clearSentence()
             selectedWordIndex = index
             selectedSpokenWord = page.words[index].text
             library.requestWord(index, on: page.id, in: bookID)
-        }
+        }, onDragSelection: { start, end in
+            sentenceTask?.cancel()
+            sentenceTask = nil
+            sentenceTranslation = nil
+            sentenceError = nil
+            translatingSentence = false
+            selectedWordIndex = nil
+            selectedSpokenWord = nil
+            sentenceSelection = TranslationSpan(start: start, end: end, hebrew: "")
+        }, onTranslateSelection: { start, end in
+            translateSentence(pageIndex: page.id, start: start, end: end)
+        })
         .background(Color(uiColor: style.background))
     }
 
@@ -140,7 +160,41 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func selectionCard(page: ReadingPage) -> some View {
-        if let index = selectedWordIndex, page.words.indices.contains(index),
+        if let sentenceSelection, page.words.indices.contains(sentenceSelection.start),
+           page.words.indices.contains(sentenceSelection.end) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(selectedPassage(in: page, from: sentenceSelection.start, to: sentenceSelection.end))
+                    .font(.headline)
+                if let sentenceTranslation {
+                    Text(sentenceTranslation)
+                        .font(.title3.bold())
+                        .environment(\.layoutDirection, .rightToLeft)
+                } else if let sentenceError {
+                    Text(sentenceError).font(.caption).foregroundStyle(.secondary)
+                    Button("Retry passage translation") {
+                        translateSentence(pageIndex: page.id, start: sentenceSelection.start,
+                                          end: sentenceSelection.end)
+                    }.font(.caption)
+                } else if translatingSentence {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.gray.opacity(0.35))
+                        .frame(height: 18)
+                        .opacity(loadingOpacity)
+                        .accessibilityLabel("Translating passage")
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                                loadingOpacity = 0.35
+                            }
+                        }
+                } else {
+                    Text("Lift your finger to translate the selection")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        } else if let index = selectedWordIndex, page.words.indices.contains(index),
            let selected = page.translations.first(where: { $0.contains(index) }) {
             HStack(alignment: .firstTextBaseline) {
                 Text(page.words[selected.start...selected.end].map(\.text).joined(separator: " "))
@@ -277,9 +331,72 @@ struct ReaderView: View {
 
     private func changePage(to index: Int) {
         speech.stop()
+        clearSentence()
         selectedWordIndex = nil
         selectedSpokenWord = nil
         library.setPage(index, in: bookID)
+    }
+
+    private func clearSentence() {
+        sentenceTask?.cancel()
+        sentenceTask = nil
+        sentenceSelection = nil
+        sentenceTranslation = nil
+        sentenceError = nil
+        translatingSentence = false
+    }
+
+    private func selectedPassage(in page: ReadingPage, from start: Int, to end: Int) -> String {
+        let first = page.words[start]
+        let last = page.words[end]
+        return (page.text as NSString).substring(with: NSRange(
+            location: first.location, length: last.location + last.length - first.location))
+    }
+
+    private func translateSentence(pageIndex: Int, start: Int, end: Int) {
+        guard let book, book.pages.indices.contains(pageIndex) else { return }
+        sentenceTask?.cancel()
+        sentenceSelection = TranslationSpan(start: start, end: end, hebrew: "")
+        sentenceTranslation = nil
+        sentenceError = nil
+        translatingSentence = true
+        let translator = OnDemandWordTranslator(apiKey: SettingsStore.apiKey, model: SettingsStore.model)
+        sentenceTask = Task {
+            do {
+                let (prepared, body) = try translator.makeSentenceRequest(
+                    pages: book.pages, pageIndex: pageIndex, start: start, end: end)
+                var request = prepared
+                request.httpBody = body
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try Task.checkCancellation()
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard (200..<300).contains(status) else {
+                    throw OnDemandWordTranslator.responseError(status: status, data: data,
+                                                               modelID: translator.model.rawValue)
+                }
+                guard let raw = String(data: data, encoding: .utf8) else {
+                    throw OnDemandWordTranslator.Error.invalidResponse
+                }
+                library.recordSentenceUsage(raw, modelID: translator.model.rawValue, in: bookID)
+                let hebrew: String
+                do { hebrew = try OnDemandWordTranslator.parse(raw) }
+                catch {
+                    sentenceError = "Gemini returned no usable passage translation. This request may still have been billed."
+                    translatingSentence = false
+                    sentenceTask = nil
+                    return
+                }
+                try Task.checkCancellation()
+                sentenceTranslation = hebrew
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                sentenceError = error.localizedDescription
+            }
+            translatingSentence = false
+            sentenceTask = nil
+        }
     }
 
     private var speechButton: some View {

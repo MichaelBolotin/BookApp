@@ -36,6 +36,8 @@ struct InteractiveTextView: UIViewRepresentable {
     let selection: TranslationSpan?
     let style: ReaderStyle
     let onTapWord: (Int) -> Void
+    let onDragSelection: (Int, Int) -> Void
+    let onTranslateSelection: (Int, Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -48,6 +50,11 @@ struct InteractiveTextView: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 0
         let recognizer = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
         view.addGestureRecognizer(recognizer)
+        let longPress = UILongPressGestureRecognizer(target: context.coordinator,
+                                                     action: #selector(Coordinator.longPressed(_:)))
+        longPress.minimumPressDuration = 0.4
+        view.addGestureRecognizer(longPress)
+        recognizer.require(toFail: longPress)
         context.coordinator.view = view
         return view
     }
@@ -138,11 +145,38 @@ struct InteractiveTextView: UIViewRepresentable {
         var renderedText: String?
         var renderedStyle: ReaderStyle?
         var renderedSelection: TranslationSpan?
+        var dragAnchor: Int?
         init(_ parent: InteractiveTextView) { self.parent = parent }
 
         @objc func tapped(_ recognizer: UITapGestureRecognizer) {
+            guard let view, let word = word(at: recognizer.location(in: view), exact: true) else { return }
+            parent.onTapWord(word)
+        }
+
+        @objc func longPressed(_ recognizer: UILongPressGestureRecognizer) {
             guard let view else { return }
             let point = recognizer.location(in: view)
+            switch recognizer.state {
+            case .began:
+                dragAnchor = word(at: point, exact: true)
+                if let dragAnchor { parent.onDragSelection(dragAnchor, dragAnchor) }
+            case .changed:
+                if let dragAnchor, let current = word(at: point, exact: false) {
+                    parent.onDragSelection(min(dragAnchor, current), max(dragAnchor, current))
+                }
+            case .ended:
+                if let dragAnchor {
+                    let current = word(at: point, exact: false) ?? dragAnchor
+                    parent.onTranslateSelection(min(dragAnchor, current), max(dragAnchor, current))
+                }
+                dragAnchor = nil
+            default:
+                dragAnchor = nil
+            }
+        }
+
+        private func word(at point: CGPoint, exact: Bool) -> Int? {
+            guard let view, !parent.page.words.isEmpty else { return nil }
             let textPoint = CGPoint(x: point.x - view.textContainerInset.left,
                                     y: point.y - view.textContainerInset.top)
             let manager = view.layoutManager
@@ -151,11 +185,14 @@ struct InteractiveTextView: UIViewRepresentable {
             let glyphIndex = manager.glyphIndexForCharacter(at: index)
             let bounds = manager.boundingRect(forGlyphRange: NSRange(location: glyphIndex, length: 1),
                                                in: view.textContainer)
-            guard bounds.insetBy(dx: -3, dy: -3).contains(textPoint),
-                  let word = parent.page.words.first(where: {
-                      NSLocationInRange(index, NSRange(location: $0.location, length: $0.length))
-                  }) else { return }
-            parent.onTapWord(word.id)
+            if exact && !bounds.insetBy(dx: -3, dy: -3).contains(textPoint) { return nil }
+            if let word = parent.page.words.first(where: {
+                NSLocationInRange(index, NSRange(location: $0.location, length: $0.length))
+            }) { return word.id }
+            guard !exact else { return nil }
+            return parent.page.words.min(by: {
+                abs($0.location - index) < abs($1.location - index)
+            })?.id
         }
     }
 }

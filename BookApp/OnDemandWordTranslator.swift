@@ -43,6 +43,42 @@ struct OnDemandWordTranslator {
         return (request, try JSONSerialization.data(withJSONObject: body))
     }
 
+    func makeSentenceRequest(pages: [ReadingPage], pageIndex: Int,
+                             start: Int, end: Int) throws -> (URLRequest, Data) {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw Error.missingKey
+        }
+        guard pages.indices.contains(pageIndex), start <= end,
+              pages[pageIndex].words.indices.contains(start),
+              pages[pageIndex].words.indices.contains(end) else { throw Error.invalidWord }
+        let page = pages[pageIndex]
+        let first = page.words[start]
+        let last = page.words[end]
+        let range = NSRange(location: first.location,
+                            length: last.location + last.length - first.location)
+        let sentence = (page.text as NSString).substring(with: range)
+        let prompt = """
+        Translate the meaning of the entire selected English passage into natural Hebrew.
+        Preserve the sense of the sentence in context rather than translating each word separately.
+        Return only the translation in the JSON field hebrew, without explanations.
+        Selected passage: \(sentence)
+        """
+        let schema: [String: Any] = [
+            "type": "object", "properties": ["hebrew": ["type": "string"]], "required": ["hebrew"]
+        ]
+        let body: [String: Any] = [
+            "contents": [["role": "user", "parts": [["text": prompt]]]],
+            "generationConfig": ["responseFormat": ["text": ["mimeType": "APPLICATION_JSON", "schema": schema]],
+                                 "temperature": 0.2, "maxOutputTokens": 512]
+        ]
+        var request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model.rawValue):generateContent")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        request.timeoutInterval = 600
+        return (request, try JSONSerialization.data(withJSONObject: body))
+    }
+
     static func parse(_ raw: String) throws -> String {
         struct Envelope: Decodable {
             struct Candidate: Decodable {

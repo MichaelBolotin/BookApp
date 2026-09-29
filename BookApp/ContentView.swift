@@ -125,11 +125,11 @@ struct SettingsView: View {
                             Text(option.title).tag(option.rawValue)
                         }
                     }
-                    Text("The key is stored in this device's Keychain. Each new word you tap sends only that word and up to ten neighboring words on either side. Saved translations are reused without another request.")
+                    Text("The key is stored in this device's Keychain. Tap a word to translate it with up to ten neighboring words as context. Long press and drag over words to translate the selected passage. Word translations are reused; passage translations are temporary.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section {
-                    Text("Importing a PDF or pasting text does not send it to Gemini. A tapped word and its nearby context are sent when you request its translation. Books, saved translations, and reading progress are stored on this device.")
+                    Text("Importing a PDF or pasting text does not send it to Gemini. A tapped word and its nearby context, or a selected passage, are sent only when you request a translation. Books, word translations, reading progress, and request costs are stored on this device.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("iCloud") {
