@@ -116,6 +116,46 @@ final class BookLibrary: ObservableObject {
         scheduleCloudSync()
     }
 
+    func appendPDF(at url: URL, to id: UUID) throws {
+        let data = try Data(contentsOf: url)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let pages = try PDFImportService.extract(from: url)
+        try append(pages, fingerprint: digest, to: id)
+    }
+
+    func appendPastedText(to id: UUID) throws {
+        let imported = try PastedTextImportService.extract()
+        let text = imported.pages.map(\.text).joined(separator: "\u{000C}")
+        let digest = SHA256.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        try append(imported.pages, fingerprint: digest, to: id)
+    }
+
+    private func append(_ pages: [ReadingPage], fingerprint: String, to id: UUID) throws {
+        guard var book = books.first(where: { $0.id == id }) else { throw LibraryError.missingBook }
+        guard book.fingerprint != fingerprint,
+              !(book.appendedFingerprints ?? []).contains(fingerprint) else {
+            throw LibraryError.duplicateChapter
+        }
+        guard pages.contains(where: { !$0.words.isEmpty }) else { throw LibraryError.emptyChapter }
+        let offset = book.pages.count
+        book.pages += pages.enumerated().map { index, page in
+            ReadingPage(id: offset + index, text: page.text, words: page.words,
+                        formatting: page.formatting)
+        }
+        book.appendedFingerprints = (book.appendedFingerprints ?? []) + [fingerprint]
+        try replace(book)
+    }
+
+    func recordSentenceUsage(_ raw: String, modelID: String, in id: UUID) {
+        guard var book = books.first(where: { $0.id == id }) else { return }
+        book.sentenceRequestCount = (book.sentenceRequestCount ?? 0) + 1
+        if let cost = BookTranslationCost.estimate(rawResponse: raw, requestedModel: modelID) {
+            book.sentenceTranslationCosts = (book.sentenceTranslationCosts ?? []) + [cost]
+        }
+        try? replace(book)
+    }
+
     func requestWord(_ wordIndex: Int, on pageIndex: Int, in id: UUID, retry: Bool = false) {
         guard var book = books.first(where: { $0.id == id }),
               book.pages.indices.contains(pageIndex),
@@ -370,8 +410,15 @@ final class BookLibrary: ObservableObject {
     }
 
     enum LibraryError: LocalizedError {
-        case duplicate
-        var errorDescription: String? { "This book is already in your library." }
+        case duplicate, duplicateChapter, missingBook, emptyChapter
+        var errorDescription: String? {
+            switch self {
+            case .duplicate: "This book is already in your library."
+            case .duplicateChapter: "This chapter is already in this book."
+            case .missingBook: "This book is no longer available."
+            case .emptyChapter: "This chapter has no readable English words."
+            }
+        }
     }
 }
 

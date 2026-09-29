@@ -80,6 +80,11 @@ struct ReadingBook: Codable, Identifiable {
     var pendingWordTranslations: [PendingWordTranslation]? = nil
     var savedWordTranslations: [SavedWordTranslation]? = nil
     var wordTranslationFailures: [WordTranslationFailure]? = nil
+    /// Fingerprints of chapters appended after the original import.
+    var appendedFingerprints: [String]? = nil
+    /// Only usage is retained for sentence requests, never their text or translation.
+    var sentenceTranslationCosts: [BookTranslationCost]? = nil
+    var sentenceRequestCount: Int? = nil
 
     var wordCount: Int { pages.reduce(0) { $0 + $1.words.count } }
     var translatedWordCount: Int {

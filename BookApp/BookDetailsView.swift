@@ -1,22 +1,37 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct BookDetailsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var library: BookLibrary
     let bookID: UUID
+    @State private var importingChapter = false
+    @State private var importError: String?
 
     var body: some View {
         NavigationStack {
             if let book = library.books.first(where: { $0.id == bookID }) {
                 let wordCosts = (book.savedWordTranslations ?? []).compactMap(\.cost)
                 let historicalCosts = book.historicalCosts ?? []
-                let allCosts = historicalCosts + wordCosts
-                let requestCount = (book.savedWordTranslations ?? []).count + (book.historicalRequestCount ?? 0)
+                let allCosts = historicalCosts + wordCosts + (book.sentenceTranslationCosts ?? [])
+                let requestCount = (book.savedWordTranslations ?? []).count
+                    + (book.historicalRequestCount ?? 0) + (book.sentenceRequestCount ?? 0)
                 Form {
                     Section("Book") {
                         LabeledContent("Title", value: book.title)
                         LabeledContent("Pages", value: "\(book.pages.count)")
                         LabeledContent("Translated words", value: "\(book.translatedWordCount) of \(book.wordCount)")
+                    }
+                    Section("Add a chapter") {
+                        Button("Add PDF to this book", systemImage: "doc.badge.plus") {
+                            importingChapter = true
+                        }
+                        Button("Append copied text", systemImage: "doc.on.clipboard") {
+                            do { try library.appendPastedText(to: bookID) }
+                            catch { importError = error.localizedDescription }
+                        }
+                        Text("New pages are added at the end. Existing pages, translations, and reading position are kept.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                     Section("Translation cost") {
                         if requestCount > 0 {
@@ -47,6 +62,17 @@ struct BookDetailsView: View {
                 }
                 .navigationTitle("Book details")
                 .toolbar { Button("Done") { dismiss() } }
+                .fileImporter(isPresented: $importingChapter, allowedContentTypes: [.pdf]) { result in
+                    do {
+                        let url = try result.get()
+                        let accessing = url.startAccessingSecurityScopedResource()
+                        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                        try library.appendPDF(at: url, to: bookID)
+                    } catch { importError = error.localizedDescription }
+                }
+                .alert("Could not add chapter", isPresented: Binding(
+                    get: { importError != nil }, set: { if !$0 { importError = nil } }
+                )) { Button("OK", role: .cancel) {} } message: { Text(importError ?? "") }
             }
         }
     }
